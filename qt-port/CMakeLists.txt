@@ -33,6 +33,7 @@ add_library(comic_engine STATIC
     engine/pose.cpp
     engine/avatario.cpp
     engine/backdrop_qt.cpp
+    engine/scene.cpp
 )
 target_include_directories(comic_engine PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}

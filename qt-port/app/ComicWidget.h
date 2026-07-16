@@ -3,37 +3,33 @@
 
 #pragma once
 
-#include "engine/avatario.h"
-#include "engine/image.h"
+#include "engine/scene.h"
 
 #include <QWidget>
 #include <QString>
-#include <memory>
 
 class ComicWidget : public QWidget {
     Q_OBJECT
 public:
     explicit ComicWidget(QWidget *parent = nullptr);
 
-    void setDemoMessage(const QString &msg);
-    QString demoMessage() const { return m_demoMessage; }
+    void addChatLine(const QString &text);
+    void clearPanels();
+    QString statusLine() const;
 
     QSize sizeHint() const override;
+    QSize minimumSizeHint() const override;
 
 protected:
     void paintEvent(QPaintEvent *event) override;
     void showEvent(QShowEvent *event) override;
+    void resizeEvent(QResizeEvent *event) override;
 
 private:
     void ensureAssetsLoaded();
 
-    QString m_demoMessage;
+    ComicScene m_scene;
     bool m_assetsTried = false;
     bool m_assetsOk = false;
-    QString m_statusLine;
-    ComicImage m_backdrop;
-    LoadedAvatar m_avatar;
-    USHORT m_bodyPose = 0;
-    USHORT m_facePose = 0;
-    USHORT m_torsoPose = 0;
+    QString m_loadError;
 };
