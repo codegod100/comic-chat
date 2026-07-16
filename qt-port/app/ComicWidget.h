@@ -17,10 +17,12 @@ public:
     void clearPanels();
     QString statusLine() const;
 
+    // Viewport height drives square panel size; width grows with panel count.
+    void setViewportHeight(int h);
+    int viewportHeight() const { return m_viewportH; }
+
     QSize sizeHint() const override;
     QSize minimumSizeHint() const override;
-    bool hasHeightForWidth() const override { return true; }
-    int heightForWidth(int w) const override;
 
 signals:
     void contentResized();
@@ -28,15 +30,17 @@ signals:
 protected:
     void paintEvent(QPaintEvent *event) override;
     void showEvent(QShowEvent *event) override;
-    void resizeEvent(QResizeEvent *event) override;
 
 private:
     void ensureAssetsLoaded();
     void relayout();
+    int contentHeight() const;
+    int contentWidth() const;
 
     ComicScene m_scene;
     bool m_assetsTried = false;
     bool m_assetsOk = false;
     QString m_loadError;
     int m_margin = 12;
+    int m_viewportH = 400;
 };

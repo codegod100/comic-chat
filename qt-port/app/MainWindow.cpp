@@ -75,13 +75,13 @@ MainWindow::MainWindow(QWidget *parent)
 
     auto *split = new QSplitter(Qt::Vertical, central);
 
-    // Manual widget sizing keeps panels square; resizable=true would squash again.
+    // Horizontal comic strip: panels left→right, side-scroll for history.
     m_comicScroll = new QScrollArea(split);
     m_comicScroll->setWidgetResizable(false);
     m_comicScroll->setFrameShape(QFrame::NoFrame);
-    m_comicScroll->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
-    m_comicScroll->setVerticalScrollBarPolicy(Qt::ScrollBarAsNeeded);
-    m_comicScroll->setAlignment(Qt::AlignHCenter | Qt::AlignTop);
+    m_comicScroll->setHorizontalScrollBarPolicy(Qt::ScrollBarAsNeeded);
+    m_comicScroll->setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+    m_comicScroll->setAlignment(Qt::AlignLeft | Qt::AlignVCenter);
     m_comic = new ComicWidget;
     m_comicScroll->setWidget(m_comic);
     m_comicScroll->viewport()->installEventFilter(this);
@@ -90,7 +90,7 @@ MainWindow::MainWindow(QWidget *parent)
     m_log = new QListWidget(split);
     m_log->setMaximumHeight(140);
     m_log->addItem(QStringLiteral(
-        "Connect to IRC, or type offline. Panels stay square — scroll for history."));
+        "Connect to IRC, or type offline. Panels scroll sideways →"));
     split->addWidget(m_comicScroll);
     split->addWidget(m_log);
     split->setStretchFactor(0, 5);
@@ -134,13 +134,15 @@ void MainWindow::syncComicSize()
     if (!m_comic || !m_comicScroll) {
         return;
     }
-    // Fit width to viewport; panel square side is further capped in ComicScene
-    // so a single panel isn't taller than a typical window.
-    const int vw = std::max(260, m_comicScroll->viewport()->width());
-    const int h = m_comic->heightForWidth(vw);
-    m_comic->resize(vw, h);
-    m_comicScroll->verticalScrollBar()->setValue(
-        m_comicScroll->verticalScrollBar()->maximum());
+    // Panel size from viewport height; strip width grows with panel count.
+    const int vh = std::max(220, m_comicScroll->viewport()->height());
+    m_comic->setViewportHeight(vh);
+    const QSize hint = m_comic->sizeHint();
+    m_comic->resize(std::max(hint.width(), m_comicScroll->viewport()->width()),
+                    hint.height());
+    // Keep the newest panel in view (scroll to the right).
+    m_comicScroll->horizontalScrollBar()->setValue(
+        m_comicScroll->horizontalScrollBar()->maximum());
 }
 
 void MainWindow::appendLog(const QString &line)

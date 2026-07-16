@@ -446,22 +446,27 @@ void ComicScene::drawPanel(ICanvas *canvas, const ScenePanel &panel, const RECT 
     canvas->restore();
 }
 
-int ComicScene::panelSideForWidth(int contentWidth)
+int ComicScene::panelSideForHeight(int contentHeight)
 {
-    // Keep panels square. Cap for viewport fit; floor so art stays readable.
-    const int side = std::min(contentWidth, 520);
-    return std::max(240, side);
+    // Square panels sized to the viewport height (side scroll strip).
+    const int side = std::min(contentHeight, 560);
+    return std::max(220, side);
 }
 
-int ComicScene::contentHeightForWidth(int contentWidth) const
+int ComicScene::contentWidthForHeight(int contentHeight) const
 {
-    constexpr int kGap = 12;
-    const int side = panelSideForWidth(contentWidth);
+    constexpr int kGap = 14;
+    const int side = panelSideForHeight(contentHeight);
     if (m_panels.empty()) {
-        return side; // empty state still one square of space
+        return side;
     }
     const int n = static_cast<int>(m_panels.size());
     return n * side + (n - 1) * kGap;
+}
+
+int ComicScene::contentHeightForHeight(int contentHeight) const
+{
+    return panelSideForHeight(contentHeight);
 }
 
 void ComicScene::draw(ICanvas *canvas, const RECT &dest) const
@@ -470,28 +475,24 @@ void ComicScene::draw(ICanvas *canvas, const RECT &dest) const
         return;
     }
 
-    constexpr int kGap = 12;
-    const int contentW = std::max(1, dest.right - dest.left);
-    // Square panel: side from width, never "availH / n" (that squashed them).
-    const int side = panelSideForWidth(contentW);
-    // Center horizontally if dest is wider than the square.
+    constexpr int kGap = 14;
+    const int contentH = std::max(1, dest.bottom - dest.top);
+    const int side = panelSideForHeight(contentH);
     const int panelW = side;
     const int panelH = side;
-    const int x0 = dest.left + std::max(0, (contentW - side) / 2);
+    // Vertically center the strip in dest if dest is taller than the panel.
+    const int y0 = dest.top + std::max(0, (contentH - side) / 2);
 
     auto *self = const_cast<ComicScene *>(this);
     self->m_layoutPxPerTwip = double(panelW) / UNIT_PANEL_W;
-    // Slightly smaller UI font so text fits the balloon comfortably
     self->m_fontPoint = std::max(9, std::min(14, panelH / 36));
 
-    // Re-flow body + balloons with the metrics we're about to draw with.
-    // (addLine may have run with a different scale/font.)
     for (auto &p : self->m_panels) {
         self->layoutPanel(p);
     }
 
     if (m_panels.empty()) {
-        RECT empty{x0, dest.top, x0 + panelW, dest.top + panelH};
+        RECT empty{dest.left, y0, dest.left + panelW, y0 + panelH};
         canvas->setBrush(CanvasColor::rgb(255, 255, 255));
         canvas->setPen(CanvasColor::rgb(40, 40, 40), 2);
         canvas->fillRect(empty);
@@ -499,17 +500,17 @@ void ComicScene::draw(ICanvas *canvas, const RECT &dest) const
         canvas->setFont("Sans Serif", 12, false);
         canvas->setPen(CanvasColor::rgb(80, 80, 80), 1);
         canvas->drawText(empty.left + 24, empty.top + 48,
-                         "Type a line below and press Enter to add a comic panel.");
+                         "Type a line below — panels scroll sideways.");
         if (!m_status.empty()) {
             canvas->drawText(empty.left + 24, empty.top + 80, m_status);
         }
         return;
     }
 
-    int y = dest.top;
+    int x = dest.left;
     for (const auto &p : m_panels) {
-        RECT pr{x0, y, x0 + panelW, y + panelH};
+        RECT pr{x, y0, x + panelW, y0 + panelH};
         drawPanel(canvas, p, pr);
-        y += panelH + kGap;
+        x += panelW + kGap;
     }
 }

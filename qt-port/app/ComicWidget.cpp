@@ -10,16 +10,33 @@
 
 #include <QPaintEvent>
 #include <QPainter>
-#include <QResizeEvent>
 #include <QShowEvent>
 
 ComicWidget::ComicWidget(QWidget *parent)
     : QWidget(parent)
 {
-    setMinimumSize(260, 260);
+    setMinimumSize(260, 240);
     setBackgroundRole(QPalette::Base);
     setAutoFillBackground(true);
-    setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Minimum);
+    setSizePolicy(QSizePolicy::Minimum, QSizePolicy::Expanding);
+}
+
+void ComicWidget::setViewportHeight(int h)
+{
+    m_viewportH = std::max(200, h);
+    relayout();
+}
+
+int ComicWidget::contentHeight() const
+{
+    const int usable = std::max(180, m_viewportH - 2 * m_margin - 22);
+    return m_scene.contentHeightForHeight(usable) + 2 * m_margin + 22;
+}
+
+int ComicWidget::contentWidth() const
+{
+    const int usable = std::max(180, m_viewportH - 2 * m_margin - 22);
+    return m_scene.contentWidthForHeight(usable) + 2 * m_margin;
 }
 
 void ComicWidget::addChatLine(const QString &text, const QString &nick)
@@ -50,22 +67,14 @@ QString ComicWidget::statusLine() const
     return QString::fromStdString(m_scene.status());
 }
 
-int ComicWidget::heightForWidth(int w) const
-{
-    const int contentW = std::max(1, w - 2 * m_margin);
-    const int body = m_scene.contentHeightForWidth(contentW);
-    return body + 2 * m_margin + 22; // + status strip
-}
-
 QSize ComicWidget::sizeHint() const
 {
-    const int w = 640;
-    return QSize(w, heightForWidth(w));
+    return QSize(contentWidth(), contentHeight());
 }
 
 QSize ComicWidget::minimumSizeHint() const
 {
-    return QSize(260, heightForWidth(260));
+    return QSize(260, 240);
 }
 
 void ComicWidget::relayout()
@@ -79,13 +88,6 @@ void ComicWidget::showEvent(QShowEvent *event)
     QWidget::showEvent(event);
     ensureAssetsLoaded();
     relayout();
-}
-
-void ComicWidget::resizeEvent(QResizeEvent *event)
-{
-    QWidget::resizeEvent(event);
-    // Width changed → square side / total height change
-    updateGeometry();
 }
 
 void ComicWidget::ensureAssetsLoaded()

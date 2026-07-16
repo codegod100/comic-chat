@@ -11,7 +11,7 @@ does **not** use MFC or the Visual Studio toolchain.
 | 0 | Scaffold, `ICanvas`, demo window | **done** |
 | 1 | Math + spline draw | **done** (vector2d, bbox, pe, traj, arc, spline) |
 | 2 | `.avb` + backdrop load | **done** (image, pose, avatario, backdrop) |
-| 3 | Panel layout from chat lines | **done** (`ComicScene` AddLine → panels) |
+| 3 | Panel layout from chat lines | **done** (left→right strip, side scroll) |
 | 4 | Main window shell (local say box) | **done** |
 | 5 | IRC (`QTcpSocket` / TLS) | **done** (`net/IrcClient`) |
 

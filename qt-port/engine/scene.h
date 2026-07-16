@@ -75,14 +75,15 @@ public:
     int unitWidth() const { return UNIT_PANEL_W; }
     int unitHeight() const { return UNIT_PANEL_H; }
 
-    // Pixel size of one square panel given available content width (margins excluded).
-    static int panelSideForWidth(int contentWidth);
-    // Total stacked height for N panels at that width (including gaps).
-    int contentHeightForWidth(int contentWidth) const;
+    // Pixel size of one square panel given available viewport height.
+    static int panelSideForHeight(int contentHeight);
+    // Total strip width for N panels at that height (including gaps).
+    int contentWidthForHeight(int contentHeight) const;
+    // Height of the strip (one panel side + padding for status is caller's job).
+    int contentHeightForHeight(int contentHeight) const;
 
-    // Draw all panels stacked vertically into dest (device pixels).
-    // Each panel is square (unit W/H are equal); do not squash to fit.
-    // Caller should size dest tall enough (scroll area) or panels clip.
+    // Draw panels left-to-right (comic strip). Each panel is square.
+    // Caller sizes dest wide enough and enables horizontal scroll.
     void draw(ICanvas *canvas, const RECT &dest) const;
 
     const std::string &status() const { return m_status; }
