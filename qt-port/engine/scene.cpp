@@ -95,7 +95,8 @@ std::vector<WrappedLine> ComicScene::wrapText(const std::string &text, int maxWi
 
 void ComicScene::layoutBalloon(SceneBalloon &b, const SceneBody &body)
 {
-    const int maxTextW = UNIT_PANEL_W * 65 / 100;
+    // Panel space: y=0 at top, y=-UNIT_PANEL_H at bottom (top > bottom).
+    const int maxTextW = UNIT_PANEL_W * 50 / 100;
     b.lines = wrapText(b.text, maxTextW);
 
     const int lineH = logicalLineHeight(m_fontPoint, m_layoutPxPerTwip);
@@ -103,28 +104,59 @@ void ComicScene::layoutBalloon(SceneBalloon &b, const SceneBody &body)
     for (const auto &ln : b.lines) {
         maxW = std::max(maxW, ln.width);
     }
-    maxW = std::max(maxW, 400);
+    maxW = std::max(maxW, 360);
 
-    const int textH = std::max(1, static_cast<int>(b.lines.size())) * lineH;
-    const int padX = 280;
-    const int padY = 180;
-    const int boxW = maxW + 2 * padX;
-    const int boxH = textH + 2 * padY;
+    const int nTextLines =
+        std::max(1, static_cast<int>(b.lines.size())) + (b.nick.empty() ? 0 : 1);
+    int boxW = std::min(maxW + 2 * 220, UNIT_PANEL_W * 75 / 100);
+    int boxH = std::min(nTextLines * lineH + 2 * 140, UNIT_PANEL_H * 26 / 100);
+    boxH = std::max(boxH, lineH * 2 + 200);
 
     int cx = body.arrowX;
-    cx = std::max(boxW / 2 + 200, std::min(UNIT_PANEL_W - boxW / 2 - 200, cx));
+    cx = std::max(boxW / 2 + 160, std::min(UNIT_PANEL_W - boxW / 2 - 160, cx));
 
-    // Panel coords: y=0 top, y=-UNIT_PANEL_H bottom
+    constexpr int kTopMargin = 180;  // keep cloud under panel top
+    constexpr int kCloudExtra = 100; // spline padding beyond text box
+    constexpr int kTailGap = 320;    // space from head top to balloon bottom
+
+    // Place balloon bottom just above the head; top = bottom + height.
+    int bot = body.box.top + kTailGap;
+    int top = bot + boxH;
+
+    // If cloud would stick out past the panel top, shift the whole balloon down.
+    if (top + kCloudExtra > -kTopMargin) {
+        const int overshoot = (top + kCloudExtra) - (-kTopMargin);
+        top -= overshoot;
+        bot -= overshoot;
+    }
+
+    // Never overlap the head (keep a small gap).
+    const int minBot = body.box.top + 120;
+    if (bot < minBot) {
+        // Not enough room: pin bottom above head and grow upward if possible.
+        bot = minBot;
+        top = bot + boxH;
+        if (top + kCloudExtra > -kTopMargin) {
+            top = -kTopMargin - kCloudExtra;
+            // Ensure top > bot
+            if (top <= bot) {
+                top = bot + lineH * 2;
+            }
+        }
+    }
+
     b.textBox.left = cx - boxW / 2;
     b.textBox.right = cx + boxW / 2;
-    b.textBox.top = -280;
-    b.textBox.bottom = b.textBox.top - boxH;
+    b.textBox.top = top;
+    b.textBox.bottom = bot;
 
-    b.cloudBox = b.textBox;
-    b.cloudBox.left -= 100;
-    b.cloudBox.right += 100;
-    b.cloudBox.top += 40;
-    b.cloudBox.bottom -= 80;
+    b.cloudBox.left = b.textBox.left - 70;
+    b.cloudBox.right = b.textBox.right + 70;
+    b.cloudBox.top = b.textBox.top + kCloudExtra;
+    b.cloudBox.bottom = b.textBox.bottom - 70;
+    if (b.cloudBox.top > -kTopMargin) {
+        b.cloudBox.top = -kTopMargin;
+    }
 
     b.speakerArrowX = body.arrowX;
     b.speakerTop = body.box.top;
@@ -159,7 +191,7 @@ static void computeComplexBodyBoxes(const SceneBody &body, CPose *head, CPose *t
     // Fit in client, then shrink so the figure isn't panel-filling.
     // Original max was ~unitHeight/1.9; we keep ~38% of panel height.
     double scale = std::min(double(clientW) / bitW, double(clientH) / bitH);
-    scale *= 0.72;
+    scale *= 0.62; // keep figure modest so balloon fits above
     const int fullW = std::max(1, int(std::lround(scale * bitW)));
     const int fullH = std::max(1, int(std::lround(scale * bitH)));
 
@@ -198,12 +230,12 @@ static void computeComplexBodyBoxes(const SceneBody &body, CPose *head, CPose *t
 
 void ComicScene::layoutPanel(ScenePanel &panel)
 {
-    // Client region for body: lower ~45% of panel (leave room for balloons).
+    // Body in lower ~40% of panel; upper area reserved for on-screen balloons.
     RECT client;
-    client.left = UNIT_PANEL_W / 8;
-    client.right = UNIT_PANEL_W - UNIT_PANEL_W / 8;
-    client.top = -UNIT_PANEL_H * 55 / 100;
-    client.bottom = -UNIT_PANEL_H + 120;
+    client.left = UNIT_PANEL_W / 6;
+    client.right = UNIT_PANEL_W - UNIT_PANEL_W / 6;
+    client.top = -UNIT_PANEL_H * 58 / 100;
+    client.bottom = -UNIT_PANEL_H + 160;
 
     if (panel.body.type == AT_COMPLEX) {
         CPose *head = GetPoseFromID(panel.body.facePose);
@@ -408,10 +440,10 @@ void ComicScene::drawPanel(ICanvas *canvas, const ScenePanel &panel, const RECT 
 
 int ComicScene::panelSideForWidth(int contentWidth)
 {
-    // Keep panels square (UNIT_PANEL_W == UNIT_PANEL_H). Cap so a single
-    // panel stays readable; floor so it never collapses.
-    const int side = std::min(contentWidth, 640);
-    return std::max(220, side);
+    // Keep panels square. Cap so one panel fits a typical laptop viewport
+    // without forcing huge scroll / off-screen balloons.
+    const int side = std::min(contentWidth, 420);
+    return std::max(200, side);
 }
 
 int ComicScene::contentHeightForWidth(int contentWidth) const

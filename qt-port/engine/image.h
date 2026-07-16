@@ -35,6 +35,9 @@ public:
     void makeColorKey(COLORREF key);
     // Treat near-white pixels as transparent (1bpp line art / SRCAND style).
     void makeWhiteTransparent(int threshold = 250);
+    // For unmasked line art: flood-fill exterior, white-fill enclosed regions,
+    // solid black ink — so open chests aren't "wallpaper showing through".
+    void fillLineArtInteriors(int threshold = 250);
 
     // Draw helpers onto ICanvas (expects QtCanvas under the hood).
     // x,y = top-left of destination in canvas logical coords when scale is +Y-down;

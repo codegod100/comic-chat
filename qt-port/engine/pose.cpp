@@ -27,11 +27,11 @@ void CPose::drawMasked(ICanvas *canvas, int x, int y, int w, int h) const
     }
     ComicImage tmp = *m_drawing;
     if (m_mask && !m_mask->isNull()) {
-        // Masked heads: silhouette + solid ink
+        // Masked heads: white skin fill + black ink inside silhouette
         tmp.applyMask(*m_mask);
     } else {
-        // Unmasked torsos: white key + solid black ink (SRCAND equivalent)
-        tmp.makeWhiteTransparent();
+        // Unmasked torsos: white-fill enclosed regions, clear exterior, black ink
+        tmp.fillLineArtInteriors();
     }
     tmp.draw(canvas, x, y, w, h);
 }

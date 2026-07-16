@@ -7,6 +7,7 @@
 
 #include <QFile>
 #include <algorithm>
+#include <queue>
 #include <vector>
 
 #pragma pack(push, 1)
@@ -137,7 +138,6 @@ void ComicImage::makeWhiteTransparent(int threshold)
         return;
     }
     // Unmasked poses (many torsos): GDI SRCAND — white clear, black solid ink.
-    // No white body fill is stored in those bitmaps (outline + solid black only).
     m_img = m_img.convertToFormat(QImage::Format_ARGB32);
     for (int y = 0; y < m_img.height(); ++y) {
         auto *line = reinterpret_cast<QRgb *>(m_img.scanLine(y));
@@ -147,6 +147,78 @@ void ComicImage::makeWhiteTransparent(int threshold)
                 line[x] = qRgba(0, 0, 0, 0);
             } else {
                 line[x] = qRgba(0, 0, 0, 255);
+            }
+        }
+    }
+}
+
+void ComicImage::fillLineArtInteriors(int threshold)
+{
+    if (m_img.isNull()) {
+        return;
+    }
+    m_img = m_img.convertToFormat(QImage::Format_ARGB32);
+    const int w = m_img.width();
+    const int h = m_img.height();
+    if (w <= 0 || h <= 0) {
+        return;
+    }
+
+    // 0 = empty (was white), 1 = ink (black)
+    std::vector<uint8_t> ink(static_cast<size_t>(w * h), 0);
+    for (int y = 0; y < h; ++y) {
+        const auto *line = reinterpret_cast<const QRgb *>(m_img.constScanLine(y));
+        for (int x = 0; x < w; ++x) {
+            if (!(qRed(line[x]) >= threshold && qGreen(line[x]) >= threshold &&
+                  qBlue(line[x]) >= threshold)) {
+                ink[static_cast<size_t>(y * w + x)] = 1;
+            }
+        }
+    }
+
+    // Flood-fill exterior from image border through non-ink pixels.
+    std::vector<uint8_t> exterior(static_cast<size_t>(w * h), 0);
+    std::queue<int> q;
+    auto push = [&](int x, int y) {
+        if (x < 0 || y < 0 || x >= w || y >= h) {
+            return;
+        }
+        const int i = y * w + x;
+        if (exterior[static_cast<size_t>(i)] || ink[static_cast<size_t>(i)]) {
+            return;
+        }
+        exterior[static_cast<size_t>(i)] = 1;
+        q.push(i);
+    };
+    for (int x = 0; x < w; ++x) {
+        push(x, 0);
+        push(x, h - 1);
+    }
+    for (int y = 0; y < h; ++y) {
+        push(0, y);
+        push(w - 1, y);
+    }
+    while (!q.empty()) {
+        const int i = q.front();
+        q.pop();
+        const int x = i % w;
+        const int y = i / w;
+        push(x + 1, y);
+        push(x - 1, y);
+        push(x, y + 1);
+        push(x, y - 1);
+    }
+
+    for (int y = 0; y < h; ++y) {
+        auto *line = reinterpret_cast<QRgb *>(m_img.scanLine(y));
+        for (int x = 0; x < w; ++x) {
+            const int i = y * w + x;
+            if (ink[static_cast<size_t>(i)]) {
+                line[x] = qRgba(0, 0, 0, 255); // outline / solid ink
+            } else if (exterior[static_cast<size_t>(i)]) {
+                line[x] = qRgba(0, 0, 0, 0); // outside figure
+            } else {
+                line[x] = qRgba(255, 255, 255, 255); // enclosed fill (body)
             }
         }
     }

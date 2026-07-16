@@ -134,10 +134,11 @@ void MainWindow::syncComicSize()
     if (!m_comic || !m_comicScroll) {
         return;
     }
+    // Fit width to viewport; panel square side is further capped in ComicScene
+    // so a single panel isn't taller than a typical window.
     const int vw = std::max(260, m_comicScroll->viewport()->width());
     const int h = m_comic->heightForWidth(vw);
     m_comic->resize(vw, h);
-    // Keep newest panel visible
     m_comicScroll->verticalScrollBar()->setValue(
         m_comicScroll->verticalScrollBar()->maximum());
 }
