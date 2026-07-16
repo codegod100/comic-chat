@@ -6,15 +6,19 @@
 #include "net/IrcClient.h"
 
 #include <QCheckBox>
-#include <QFormLayout>
+#include <QEvent>
+#include <QFrame>
 #include <QGroupBox>
 #include <QHBoxLayout>
 #include <QLabel>
 #include <QLineEdit>
 #include <QListWidget>
 #include <QPushButton>
+#include <QScrollArea>
+#include <QScrollBar>
 #include <QSplitter>
 #include <QStatusBar>
+#include <QTimer>
 #include <QVBoxLayout>
 #include <QWidget>
 
@@ -35,7 +39,6 @@ MainWindow::MainWindow(QWidget *parent)
     auto *central = new QWidget(this);
     auto *layout = new QVBoxLayout(central);
 
-    // --- IRC bar ---
     auto *ircBox = new QGroupBox(QStringLiteral("IRC"), central);
     auto *ircForm = new QHBoxLayout(ircBox);
 
@@ -71,14 +74,24 @@ MainWindow::MainWindow(QWidget *parent)
     ircForm->addWidget(m_disconnectBtn);
 
     auto *split = new QSplitter(Qt::Vertical, central);
-    m_comic = new ComicWidget(split);
+
+    // Manual widget sizing keeps panels square; resizable=true would squash again.
+    m_comicScroll = new QScrollArea(split);
+    m_comicScroll->setWidgetResizable(false);
+    m_comicScroll->setFrameShape(QFrame::NoFrame);
+    m_comicScroll->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+    m_comicScroll->setVerticalScrollBarPolicy(Qt::ScrollBarAsNeeded);
+    m_comicScroll->setAlignment(Qt::AlignHCenter | Qt::AlignTop);
+    m_comic = new ComicWidget;
+    m_comicScroll->setWidget(m_comic);
+    m_comicScroll->viewport()->installEventFilter(this);
+    connect(m_comic, &ComicWidget::contentResized, this, &MainWindow::syncComicSize);
+
     m_log = new QListWidget(split);
     m_log->setMaximumHeight(140);
     m_log->addItem(QStringLiteral(
-        "Phase 5: connect to IRC, or type offline (local panels only)."));
-    m_log->addItem(QStringLiteral(
-        "Tip: Libera often needs TLS on 6697. Try a test channel you control."));
-    split->addWidget(m_comic);
+        "Connect to IRC, or type offline. Panels stay square — scroll for history."));
+    split->addWidget(m_comicScroll);
     split->addWidget(m_log);
     split->setStretchFactor(0, 5);
     split->setStretchFactor(1, 1);
@@ -93,6 +106,7 @@ MainWindow::MainWindow(QWidget *parent)
         m_comic->clearPanels();
         appendLog(QStringLiteral("Panels cleared."));
         statusBar()->showMessage(m_comic->statusLine(), 3000);
+        QTimer::singleShot(0, this, &MainWindow::syncComicSize);
     });
 
     row->addWidget(m_say, 1);
@@ -104,6 +118,28 @@ MainWindow::MainWindow(QWidget *parent)
     setCentralWidget(central);
 
     statusBar()->showMessage(QStringLiteral("Ready — offline or connect to IRC"));
+    QTimer::singleShot(0, this, &MainWindow::syncComicSize);
+}
+
+bool MainWindow::eventFilter(QObject *watched, QEvent *event)
+{
+    if (watched == m_comicScroll->viewport() && event->type() == QEvent::Resize) {
+        syncComicSize();
+    }
+    return QMainWindow::eventFilter(watched, event);
+}
+
+void MainWindow::syncComicSize()
+{
+    if (!m_comic || !m_comicScroll) {
+        return;
+    }
+    const int vw = std::max(260, m_comicScroll->viewport()->width());
+    const int h = m_comic->heightForWidth(vw);
+    m_comic->resize(vw, h);
+    // Keep newest panel visible
+    m_comicScroll->verticalScrollBar()->setValue(
+        m_comicScroll->verticalScrollBar()->maximum());
 }
 
 void MainWindow::appendLog(const QString &line)
@@ -160,19 +196,19 @@ void MainWindow::onSay()
     m_comic->addChatLine(text, nick);
     m_say->clear();
     statusBar()->showMessage(m_comic->statusLine(), 4000);
+    QTimer::singleShot(0, this, &MainWindow::syncComicSize);
 }
 
 void MainWindow::onIrcMessage(const QString &nick, const QString &text)
 {
-    // Don't double-draw our own echo if server relays it — still show others.
     if (m_irc && nick.compare(m_irc->nick(), Qt::CaseInsensitive) == 0) {
-        // We already added on send; skip echo
         appendLog(QStringLiteral("(echo) %1: %2").arg(nick, text));
         return;
     }
     appendLog(QStringLiteral("%1: %2").arg(nick, text));
     m_comic->addChatLine(text, nick);
     statusBar()->showMessage(m_comic->statusLine(), 4000);
+    QTimer::singleShot(0, this, &MainWindow::syncComicSize);
 }
 
 void MainWindow::onIrcStatus(const QString &msg)

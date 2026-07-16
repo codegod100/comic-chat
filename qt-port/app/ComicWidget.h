@@ -19,6 +19,11 @@ public:
 
     QSize sizeHint() const override;
     QSize minimumSizeHint() const override;
+    bool hasHeightForWidth() const override { return true; }
+    int heightForWidth(int w) const override;
+
+signals:
+    void contentResized();
 
 protected:
     void paintEvent(QPaintEvent *event) override;
@@ -27,9 +32,11 @@ protected:
 
 private:
     void ensureAssetsLoaded();
+    void relayout();
 
     ComicScene m_scene;
     bool m_assetsTried = false;
     bool m_assetsOk = false;
     QString m_loadError;
+    int m_margin = 12;
 };

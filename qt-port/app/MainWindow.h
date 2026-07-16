@@ -11,11 +11,15 @@ class QCheckBox;
 class QLineEdit;
 class QListWidget;
 class QPushButton;
+class QScrollArea;
 
 class MainWindow : public QMainWindow {
     Q_OBJECT
 public:
     explicit MainWindow(QWidget *parent = nullptr);
+
+protected:
+    bool eventFilter(QObject *watched, QEvent *event) override;
 
 private slots:
     void onSay();
@@ -26,12 +30,14 @@ private slots:
     void onIrcError(const QString &msg);
     void onIrcConnected();
     void onIrcDisconnected();
+    void syncComicSize();
 
 private:
     void appendLog(const QString &line);
     void setConnectedUi(bool on);
 
     ComicWidget *m_comic = nullptr;
+    QScrollArea *m_comicScroll = nullptr;
     QListWidget *m_log = nullptr;
     QLineEdit *m_say = nullptr;
 

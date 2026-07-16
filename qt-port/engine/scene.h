@@ -69,8 +69,14 @@ public:
     int unitWidth() const { return UNIT_PANEL_W; }
     int unitHeight() const { return UNIT_PANEL_H; }
 
+    // Pixel size of one square panel given available content width (margins excluded).
+    static int panelSideForWidth(int contentWidth);
+    // Total stacked height for N panels at that width (including gaps).
+    int contentHeightForWidth(int contentWidth) const;
+
     // Draw all panels stacked vertically into dest (device pixels).
-    // dest is the full comic area; panels share width and stack downward.
+    // Each panel is square (unit W/H are equal); do not squash to fit.
+    // Caller should size dest tall enough (scroll area) or panels clip.
     void draw(ICanvas *canvas, const RECT &dest) const;
 
     const std::string &status() const { return m_status; }

@@ -320,41 +320,63 @@ void ComicScene::drawPanel(ICanvas *canvas, const ScenePanel &panel, const RECT 
     canvas->restore();
 }
 
+int ComicScene::panelSideForWidth(int contentWidth)
+{
+    // Keep panels square (UNIT_PANEL_W == UNIT_PANEL_H). Cap so a single
+    // panel stays readable; floor so it never collapses.
+    const int side = std::min(contentWidth, 640);
+    return std::max(220, side);
+}
+
+int ComicScene::contentHeightForWidth(int contentWidth) const
+{
+    constexpr int kGap = 12;
+    const int side = panelSideForWidth(contentWidth);
+    if (m_panels.empty()) {
+        return side; // empty state still one square of space
+    }
+    const int n = static_cast<int>(m_panels.size());
+    return n * side + (n - 1) * kGap;
+}
+
 void ComicScene::draw(ICanvas *canvas, const RECT &dest) const
 {
     if (!canvas) {
         return;
     }
 
-    const int n = std::max(1, static_cast<int>(m_panels.size()));
-    const int gap = 10;
-    const int totalGap = gap * (std::max(0, n - 1));
-    const int availH = std::max(100, dest.bottom - dest.top - totalGap);
-    const int panelH = m_panels.empty() ? availH : std::max(120, availH / n);
-    const int panelW = dest.right - dest.left;
+    constexpr int kGap = 12;
+    const int contentW = std::max(1, dest.right - dest.left);
+    // Square panel: side from width, never "availH / n" (that squashed them).
+    const int side = panelSideForWidth(contentW);
+    // Center horizontally if dest is wider than the square.
+    const int panelW = side;
+    const int panelH = side;
+    const int x0 = dest.left + std::max(0, (contentW - side) / 2);
 
     const_cast<ComicScene *>(this)->m_layoutPxPerTwip = double(panelW) / UNIT_PANEL_W;
-    const_cast<ComicScene *>(this)->m_fontPoint = std::max(9, std::min(18, panelH / 26));
+    const_cast<ComicScene *>(this)->m_fontPoint = std::max(10, std::min(18, panelH / 28));
 
     if (m_panels.empty()) {
+        RECT empty{x0, dest.top, x0 + panelW, dest.top + panelH};
         canvas->setBrush(CanvasColor::rgb(255, 255, 255));
         canvas->setPen(CanvasColor::rgb(40, 40, 40), 2);
-        canvas->fillRect(dest);
-        canvas->drawRect(dest);
+        canvas->fillRect(empty);
+        canvas->drawRect(empty);
         canvas->setFont("Sans Serif", 12, false);
         canvas->setPen(CanvasColor::rgb(80, 80, 80), 1);
-        canvas->drawText(dest.left + 24, dest.top + 48,
+        canvas->drawText(empty.left + 24, empty.top + 48,
                          "Type a line below and press Enter to add a comic panel.");
         if (!m_status.empty()) {
-            canvas->drawText(dest.left + 24, dest.top + 80, m_status);
+            canvas->drawText(empty.left + 24, empty.top + 80, m_status);
         }
         return;
     }
 
     int y = dest.top;
     for (const auto &p : m_panels) {
-        RECT pr{dest.left, y, dest.left + panelW, y + panelH};
+        RECT pr{x0, y, x0 + panelW, y + panelH};
         drawPanel(canvas, p, pr);
-        y += panelH + gap;
+        y += panelH + kGap;
     }
 }

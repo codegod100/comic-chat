@@ -16,9 +16,10 @@
 ComicWidget::ComicWidget(QWidget *parent)
     : QWidget(parent)
 {
-    setMinimumSize(480, 360);
+    setMinimumSize(260, 260);
     setBackgroundRole(QPalette::Base);
     setAutoFillBackground(true);
+    setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Minimum);
 }
 
 void ComicWidget::addChatLine(const QString &text, const QString &nick)
@@ -30,12 +31,14 @@ void ComicWidget::addChatLine(const QString &text, const QString &nick)
     }
     const QString who = nick.isEmpty() ? QStringLiteral("you") : nick;
     m_scene.addLine(text.toStdString(), SM_SAY, who.toStdString());
+    relayout();
     update();
 }
 
 void ComicWidget::clearPanels()
 {
     m_scene.clear();
+    relayout();
     update();
 }
 
@@ -47,26 +50,42 @@ QString ComicWidget::statusLine() const
     return QString::fromStdString(m_scene.status());
 }
 
+int ComicWidget::heightForWidth(int w) const
+{
+    const int contentW = std::max(1, w - 2 * m_margin);
+    const int body = m_scene.contentHeightForWidth(contentW);
+    return body + 2 * m_margin + 22; // + status strip
+}
+
 QSize ComicWidget::sizeHint() const
 {
-    return QSize(720, 520);
+    const int w = 640;
+    return QSize(w, heightForWidth(w));
 }
 
 QSize ComicWidget::minimumSizeHint() const
 {
-    return QSize(400, 300);
+    return QSize(260, heightForWidth(260));
+}
+
+void ComicWidget::relayout()
+{
+    updateGeometry();
+    emit contentResized();
 }
 
 void ComicWidget::showEvent(QShowEvent *event)
 {
     QWidget::showEvent(event);
     ensureAssetsLoaded();
+    relayout();
 }
 
 void ComicWidget::resizeEvent(QResizeEvent *event)
 {
     QWidget::resizeEvent(event);
-    update();
+    // Width changed → square side / total height change
+    updateGeometry();
 }
 
 void ComicWidget::ensureAssetsLoaded()
@@ -93,7 +112,6 @@ void ComicWidget::ensureAssetsLoaded()
         return;
     }
 
-    // Warm pose cache
     if (avatar.type == AT_COMPLEX) {
         if (avatar.facePoses.empty() || avatar.torsoPoses.empty() ||
             !GetPoseFromID(avatar.facePoses.front()) ||
@@ -128,10 +146,11 @@ void ComicWidget::paintEvent(QPaintEvent *event)
     QtCanvas canvas(&painter);
     canvas.setLogicalScale(1.0, 1.0);
 
-    RECT dest{16, 16, width() - 16, height() - 36};
+    const int statusH = 20;
+    RECT dest{m_margin, m_margin, width() - m_margin, height() - m_margin - statusH};
     m_scene.draw(&canvas, dest);
 
     canvas.setFont("Sans Serif", 10, false);
     canvas.setPen(CanvasColor::rgb(50, 50, 50), 1);
-    canvas.drawText(16, height() - 14, statusLine().toStdString());
+    canvas.drawText(m_margin, height() - 8, statusLine().toStdString());
 }
