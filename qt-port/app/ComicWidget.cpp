@@ -8,9 +8,20 @@
 #include "engine/pose.h"
 #include "platform/QtCanvas.h"
 
+#include <QNetworkReply>
+#include <QNetworkRequest>
 #include <QPaintEvent>
 #include <QPainter>
+#include <QRegularExpression>
 #include <QShowEvent>
+#include <QUrl>
+
+namespace {
+bool contentTypeIsImage(const QString &ct)
+{
+    return ct.startsWith(QLatin1String("image/"), Qt::CaseInsensitive);
+}
+} // namespace
 
 ComicWidget::ComicWidget(QWidget *parent)
     : QWidget(parent)
@@ -19,6 +30,12 @@ ComicWidget::ComicWidget(QWidget *parent)
     setBackgroundRole(QPalette::Base);
     setAutoFillBackground(true);
     setSizePolicy(QSizePolicy::Minimum, QSizePolicy::Expanding);
+
+    connect(&m_rpg, &RpgActorClient::registryUpdated, this, [this](int n) {
+        Q_UNUSED(n);
+        update();
+    });
+    m_rpg.refreshRegistry();
 }
 
 void ComicWidget::setViewportHeight(int h)
@@ -28,8 +45,6 @@ void ComicWidget::setViewportHeight(int h)
         return;
     }
     m_viewportH = h;
-    // Size is applied by MainWindow::syncComicSize — do not emit contentResized
-    // here or we recurse (sync → setViewportHeight → contentResized → sync).
     updateGeometry();
 }
 
@@ -45,7 +60,155 @@ int ComicWidget::contentWidth() const
     return m_scene.contentWidthForHeight(usable) + 2 * m_margin;
 }
 
-void ComicWidget::addChatLine(const QString &text, const QString &nick)
+void ComicWidget::ensureRpgSprite(const QString &nick)
+{
+    if (nick.isEmpty()) {
+        return;
+    }
+    if (m_scene.hasRpgSpriteForNick(nick.toStdString())) {
+        return;
+    }
+    auto ref = m_rpg.lookupNick(nick);
+    if (!ref || !ref->hasSprite) {
+        return;
+    }
+    auto sprite = m_rpg.spriteForNick(nick, 4000);
+    if (!sprite || sprite->isNull()) {
+        return;
+    }
+    QString label = ref->displayName;
+    if (label.isEmpty()) {
+        label = ref->handle;
+    }
+    if (label.isEmpty()) {
+        label = nick;
+    }
+    m_scene.setRpgSpriteForNick(nick.toStdString(), *sprite, label.toStdString());
+}
+
+bool ComicWidget::looksLikeImageUrl(const QUrl &url)
+{
+    if (!url.isValid() || (url.scheme() != QLatin1String("http") &&
+                           url.scheme() != QLatin1String("https"))) {
+        return false;
+    }
+    const QString path = url.path().toLower();
+    static const char *exts[] = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp",
+                                 ".avif", ".svg"};
+    for (const char *e : exts) {
+        if (path.endsWith(QLatin1String(e))) {
+            return true;
+        }
+    }
+    // freeq / common CDN blob paths often omit extensions
+    if (path.contains(QLatin1String("/blob")) || path.contains(QLatin1String("/media")) ||
+        path.contains(QLatin1String("/img")) || path.contains(QLatin1String("/image")) ||
+        path.contains(QLatin1String("getblob")) || path.contains(QLatin1String("/xrpc/"))) {
+        return true;
+    }
+    return false;
+}
+
+QString ComicWidget::extractImageUrl(const QString &text)
+{
+    // Prefer first http(s) URL that looks like an image.
+    static const QRegularExpression re(
+        QStringLiteral(R"((https?://[^\s<>"'\]]+))"),
+        QRegularExpression::CaseInsensitiveOption);
+    auto it = re.globalMatch(text);
+    while (it.hasNext()) {
+        const QString raw = it.next().captured(1);
+        // Trim trailing punctuation common in chat
+        QString u = raw;
+        while (!u.isEmpty() && QStringLiteral(".,);]}>\"").contains(u.back())) {
+            u.chop(1);
+        }
+        const QUrl url(u);
+        if (looksLikeImageUrl(url)) {
+            return u;
+        }
+    }
+    // If the whole message is a single URL, treat as image candidate.
+    const QString t = text.trimmed();
+    const QUrl only(t);
+    if (only.isValid() && (only.scheme() == QLatin1String("http") ||
+                           only.scheme() == QLatin1String("https"))) {
+        return t;
+    }
+    return {};
+}
+
+QString ComicWidget::stripUrls(const QString &text)
+{
+    static const QRegularExpression re(
+        QStringLiteral(R"((https?://[^\s<>"'\]]+))"),
+        QRegularExpression::CaseInsensitiveOption);
+    QString out = text;
+    out.replace(re, QString());
+    return out.simplified();
+}
+
+void ComicWidget::fetchAndShowImage(const QUrl &url, const QString &caption, const QString &nick)
+{
+    if (!url.isValid()) {
+        return;
+    }
+    QNetworkRequest req(url);
+    req.setHeader(QNetworkRequest::UserAgentHeader,
+                  QStringLiteral("comic-chat-qt/0.1 (inline-media)"));
+    req.setAttribute(QNetworkRequest::RedirectPolicyAttribute,
+                     QNetworkRequest::NoLessSafeRedirectPolicy);
+    // Cap download size via abort after big body — simple: rely on QImage decode fail.
+
+    QNetworkReply *reply = m_nam.get(req);
+    const QString who = nick;
+    const QString cap = caption;
+    connect(reply, &QNetworkReply::finished, this, [this, reply, who, cap, url]() {
+        reply->deleteLater();
+        if (reply->error() != QNetworkReply::NoError) {
+            // Fall back to showing the URL as text so the message isn't lost.
+            ensureAssetsLoaded();
+            if (m_assetsOk) {
+                ensureRpgSprite(who);
+                const QString fallback =
+                    cap.isEmpty() ? url.toString() : (cap + QLatin1Char(' ') + url.toString());
+                m_scene.addLine(fallback.toStdString(), SM_SAY, who.toStdString());
+                relayout();
+                update();
+            }
+            return;
+        }
+        const QByteArray bytes = reply->readAll();
+        // Soft size cap ~12 MiB
+        if (bytes.size() > 12 * 1024 * 1024) {
+            return;
+        }
+        ComicImage img;
+        if (!img.loadFromData(reinterpret_cast<const unsigned char *>(bytes.constData()),
+                              bytes.size())) {
+            ensureAssetsLoaded();
+            if (m_assetsOk) {
+                ensureRpgSprite(who);
+                m_scene.addLine((cap.isEmpty() ? url.toString() : cap).toStdString(), SM_SAY,
+                                who.toStdString());
+                relayout();
+                update();
+            }
+            return;
+        }
+        ensureAssetsLoaded();
+        if (!m_assetsOk) {
+            return;
+        }
+        ensureRpgSprite(who);
+        m_scene.addImageLine(img, cap.toStdString(), SM_SAY, who.toStdString());
+        relayout();
+        update();
+    });
+}
+
+void ComicWidget::handlePossiblyMedia(const QString &text, const QString &nick,
+                                      const QHash<QString, QString> &tags)
 {
     ensureAssetsLoaded();
     if (!m_assetsOk) {
@@ -53,9 +216,60 @@ void ComicWidget::addChatLine(const QString &text, const QString &nick)
         return;
     }
     const QString who = nick.isEmpty() ? QStringLiteral("you") : nick;
+    ensureRpgSprite(who);
+
+    // freeq IRCv3 tags (see freeq-sdk media.rs)
+    QString mediaUrl = tags.value(QStringLiteral("media-url"));
+    const QString contentType = tags.value(QStringLiteral("content-type"));
+    QString alt = tags.value(QStringLiteral("media-alt"));
+
+    bool isImage = false;
+    if (!mediaUrl.isEmpty()) {
+        isImage = contentType.isEmpty() || contentTypeIsImage(contentType) ||
+                  looksLikeImageUrl(QUrl(mediaUrl));
+    }
+
+    if (!isImage) {
+        // Bare URL in body (plain clients / no tags)
+        const QString found = extractImageUrl(text);
+        if (!found.isEmpty() && looksLikeImageUrl(QUrl(found))) {
+            mediaUrl = found;
+            isImage = true;
+            if (alt.isEmpty()) {
+                alt = stripUrls(text);
+            }
+        }
+    }
+
+    if (isImage && !mediaUrl.isEmpty()) {
+        QString caption = alt;
+        if (caption.isEmpty()) {
+            caption = stripUrls(text);
+        }
+        // Don't put the raw URL in the caption
+        if (caption.contains(QLatin1String("http://"), Qt::CaseInsensitive) ||
+            caption.contains(QLatin1String("https://"), Qt::CaseInsensitive)) {
+            caption = stripUrls(caption);
+        }
+        fetchAndShowImage(QUrl(mediaUrl), caption, who);
+        return;
+    }
+
+    // Normal text
     m_scene.addLine(text.toStdString(), SM_SAY, who.toStdString());
     relayout();
     update();
+}
+
+void ComicWidget::addChatLine(const QString &text, const QString &nick)
+{
+    handlePossiblyMedia(text, nick, {});
+}
+
+void ComicWidget::addChatLine(const QString &text, const QString &nick,
+                              const QHash<QString, QString> &tags)
+{
+    handlePossiblyMedia(text, nick, tags);
 }
 
 void ComicWidget::clearPanels()
@@ -70,7 +284,13 @@ QString ComicWidget::statusLine() const
     if (!m_loadError.isEmpty()) {
         return m_loadError;
     }
-    return QString::fromStdString(m_scene.status());
+    QString s = QString::fromStdString(m_scene.status());
+    if (m_rpg.registryReady()) {
+        s += QStringLiteral(" | rpg.actor: %1").arg(m_rpg.actorCount());
+    } else {
+        s += QStringLiteral(" | rpg.actor: …");
+    }
+    return s;
 }
 
 QSize ComicWidget::sizeHint() const
@@ -120,7 +340,6 @@ void ComicWidget::ensureAssetsLoaded()
         return;
     }
 
-    // Warm first pose for each cast member so assign-time draws don't hitch as hard.
     int usable = 0;
     for (const auto &av : cast) {
         if (av.type == AT_COMPLEX) {

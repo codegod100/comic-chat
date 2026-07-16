@@ -50,6 +50,32 @@ bool ComicImage::loadFile(const std::string &path)
     return true;
 }
 
+bool ComicImage::loadFromData(const unsigned char *data, int size, const char *formatHint)
+{
+    if (!data || size <= 0) {
+        return false;
+    }
+    QImage img;
+    if (formatHint && formatHint[0]) {
+        if (!img.loadFromData(data, size, formatHint)) {
+            return false;
+        }
+    } else if (!img.loadFromData(data, size)) {
+        return false;
+    }
+    m_img = img.convertToFormat(QImage::Format_ARGB32);
+    return true;
+}
+
+void ComicImage::setQImage(QImage img)
+{
+    if (img.isNull()) {
+        m_img = QImage();
+        return;
+    }
+    m_img = img.convertToFormat(QImage::Format_ARGB32);
+}
+
 bool ComicImage::loadFromBmpStream(FILE *fp)
 {
     if (!fp) {

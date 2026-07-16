@@ -20,7 +20,7 @@ CPose::~CPose()
     delete m_aura;
 }
 
-void CPose::drawMasked(ICanvas *canvas, int x, int y, int w, int h) const
+void CPose::drawMasked(ICanvas *canvas, int x, int y, int w, int h, bool flipH) const
 {
     if (!m_drawing || m_drawing->isNull()) {
         return;
@@ -32,6 +32,10 @@ void CPose::drawMasked(ICanvas *canvas, int x, int y, int w, int h) const
     } else {
         // Unmasked torsos: white-fill enclosed regions, clear exterior, black ink
         tmp.fillLineArtInteriors();
+    }
+    if (flipH && !tmp.isNull()) {
+        // Horizontal mirror — classic Comic Chat m_flip / StretchBlt negative width.
+        tmp.qimage() = tmp.qimage().flipped(Qt::Horizontal);
     }
     tmp.draw(canvas, x, y, w, h);
 }

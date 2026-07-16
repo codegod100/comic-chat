@@ -35,7 +35,16 @@ struct SceneBalloon {
     RECT cloudBox{};
     int speakerArrowX = 0;
     int speakerTop = 0;
+    // Optional inline media (freeq media-url / bare image URL).
+    ComicImage image;
+    RECT imageBox{}; // dest rect for photo inside/near balloon
+    bool hasImage() const { return !image.isNull(); }
 };
+
+// Custom body type for external sprites (e.g. rpg.actor idle frames).
+#ifndef AT_CUSTOM
+#define AT_CUSTOM 3
+#endif
 
 struct SceneBody {
     USHORT facePose = 0;
@@ -49,14 +58,27 @@ struct SceneBody {
     RECT headBox{};
     RECT torsoBox{};
     int arrowX = 0;
-    std::string avatarName; // art character name (anna, dan, …)
+    bool flip = false; // true = face left (horizontally mirrored art)
+    std::string avatarName; // art character name (anna, dan, …) or rpg handle
+    std::string nick;       // speaker nick that owns this body in the panel
+    // When type == AT_CUSTOM: full-body (or bust) image, usually an idle frame.
+    ComicImage customSprite;
 };
 
 struct ScenePanel {
-    SceneBody body;
+    // Multiple characters can share one panel (classic Comic Chat).
+    std::vector<SceneBody> bodies;
     std::vector<SceneBalloon> balloons;
     unsigned seed = 1;
 };
+
+// Soft caps matching original layout (max ~5 balloons; keep frames readable).
+#ifndef MAX_BODIES_PER_PANEL
+#define MAX_BODIES_PER_PANEL 4
+#endif
+#ifndef MAX_BALLOONS_PER_PANEL
+#define MAX_BALLOONS_PER_PANEL 4
+#endif
 
 class ComicScene {
 public:
@@ -70,8 +92,20 @@ public:
     void clear();
 
     // Add a spoken line. Nick is mapped to a stable character from the cast.
+    // If setRpgSpriteForNick() was called for this nick, that sprite is used.
     void addLine(const std::string &text, UCHAR mode = SM_SAY,
                  const std::string &nick = "you");
+
+    // Spoken line with an inline image (chat photo / freeq media upload).
+    // Caption may be empty; image must be non-null.
+    void addImageLine(const ComicImage &image, const std::string &caption = {},
+                      UCHAR mode = SM_SAY, const std::string &nick = "you");
+
+    // Prefer this image for the nick (rpg.actor sprite). Empty image clears override.
+    // Optional label is used as avatarName (e.g. handle or displayName).
+    void setRpgSpriteForNick(const std::string &nick, const ComicImage &sprite,
+                             const std::string &label = {});
+    bool hasRpgSpriteForNick(const std::string &nick) const;
 
     int panelCount() const { return static_cast<int>(m_panels.size()); }
     int avatarCount() const { return static_cast<int>(m_avatars.size()); }
@@ -91,7 +125,12 @@ public:
 
 private:
     void layoutPanel(ScenePanel &panel);
-    void layoutBalloon(SceneBalloon &b, const SceneBody &body);
+    void layoutOneBody(SceneBody &body, const RECT &client) const;
+    void assignFacing(ScenePanel &panel) const;
+    void applyBodyFlip(SceneBody &body) const;
+    void layoutBalloon(SceneBalloon &b, const SceneBody &body, int balloonIndex,
+                       int balloonCount);
+    void layoutBalloons(ScenePanel &panel);
     std::vector<WrappedLine> wrapText(const std::string &text, int maxWidthLogical) const;
     int measureLogical(const std::string &s) const;
     void drawPanel(ICanvas *canvas, const ScenePanel &panel, const RECT &pixelRect) const;
@@ -101,11 +140,20 @@ private:
     // Lowercase nick → index into m_avatars (stable for session).
     int assignAvatarIndex(const std::string &nick);
     static std::string nickKey(const std::string &nick);
-    SceneBody bodyFromAvatar(const LoadedAvatar &av) const;
+    SceneBody bodyFromAvatar(const LoadedAvatar &av, const std::string &nick) const;
+    SceneBody bodyFromRpgSprite(const ComicImage &sprite, const std::string &nick,
+                                const std::string &label) const;
+    SceneBody bodyForNick(const std::string &nick);
     bool warmAvatarPoses(const LoadedAvatar &av) const;
+    static int findBodyIndex(const ScenePanel &panel, const std::string &nick);
+    // True if this line should start a new panel rather than join the last one.
+    bool shouldStartNewPanel(const std::string &nick) const;
 
     std::vector<LoadedAvatar> m_avatars;
     std::map<std::string, int> m_nickToAvatar;
+    // Nick key → rpg.actor (or other) custom sprite override.
+    std::map<std::string, ComicImage> m_nickRpgSprites;
+    std::map<std::string, std::string> m_nickRpgLabels;
     int m_nextAssign = 0;
     ComicImage m_backdrop;
     std::vector<ScenePanel> m_panels;

@@ -118,12 +118,13 @@ int ComicScene::assignAvatarIndex(const std::string &nick)
     return 0;
 }
 
-SceneBody ComicScene::bodyFromAvatar(const LoadedAvatar &av) const
+SceneBody ComicScene::bodyFromAvatar(const LoadedAvatar &av, const std::string &nick) const
 {
     SceneBody body;
     body.type = av.type;
     body.flags = av.flags;
     body.avatarName = av.name;
+    body.nick = nick.empty() ? "you" : nick;
     if (av.type == AT_COMPLEX) {
         if (!av.faces.empty()) {
             const FaceRec &f = av.faces.front();
@@ -147,6 +148,99 @@ SceneBody ComicScene::bodyFromAvatar(const LoadedAvatar &av) const
         body.bodyPose = av.iconPose;
     }
     return body;
+}
+
+SceneBody ComicScene::bodyFromRpgSprite(const ComicImage &sprite, const std::string &nick,
+                                        const std::string &label) const
+{
+    SceneBody body;
+    body.type = AT_CUSTOM;
+    body.nick = nick.empty() ? "you" : nick;
+    body.avatarName = label.empty() ? ("rpg:" + body.nick) : label;
+    body.customSprite = sprite;
+    return body;
+}
+
+void ComicScene::setRpgSpriteForNick(const std::string &nick, const ComicImage &sprite,
+                                     const std::string &label)
+{
+    const std::string key = nickKey(nick);
+    if (sprite.isNull()) {
+        m_nickRpgSprites.erase(key);
+        m_nickRpgLabels.erase(key);
+        return;
+    }
+    m_nickRpgSprites[key] = sprite;
+    if (!label.empty()) {
+        m_nickRpgLabels[key] = label;
+    }
+}
+
+bool ComicScene::hasRpgSpriteForNick(const std::string &nick) const
+{
+    auto it = m_nickRpgSprites.find(nickKey(nick));
+    return it != m_nickRpgSprites.end() && !it->second.isNull();
+}
+
+SceneBody ComicScene::bodyForNick(const std::string &nick)
+{
+    const std::string who = nick.empty() ? "you" : nick;
+    const std::string key = nickKey(who);
+
+    auto rpg = m_nickRpgSprites.find(key);
+    if (rpg != m_nickRpgSprites.end() && !rpg->second.isNull()) {
+        std::string label = who;
+        auto lab = m_nickRpgLabels.find(key);
+        if (lab != m_nickRpgLabels.end() && !lab->second.empty()) {
+            label = lab->second;
+        }
+        return bodyFromRpgSprite(rpg->second, who, label);
+    }
+
+    if (m_avatars.empty()) {
+        SceneBody empty;
+        empty.type = 0;
+        empty.nick = who;
+        return empty;
+    }
+    const int avIdx = assignAvatarIndex(who);
+    if (avIdx < 0) {
+        SceneBody empty;
+        empty.type = 0;
+        empty.nick = who;
+        return empty;
+    }
+    return bodyFromAvatar(m_avatars[static_cast<size_t>(avIdx)], who);
+}
+
+int ComicScene::findBodyIndex(const ScenePanel &panel, const std::string &nick)
+{
+    const std::string key = nickKey(nick);
+    for (int i = 0; i < static_cast<int>(panel.bodies.size()); ++i) {
+        if (nickKey(panel.bodies[static_cast<size_t>(i)].nick) == key) {
+            return i;
+        }
+    }
+    return -1;
+}
+
+bool ComicScene::shouldStartNewPanel(const std::string &nick) const
+{
+    if (m_panels.empty()) {
+        return true;
+    }
+    const ScenePanel &last = m_panels.back();
+    // Classic rule: speaker already on stage → new panel (their turn again).
+    if (findBodyIndex(last, nick) >= 0) {
+        return true;
+    }
+    if (static_cast<int>(last.balloons.size()) >= MAX_BALLOONS_PER_PANEL) {
+        return true;
+    }
+    if (static_cast<int>(last.bodies.size()) >= MAX_BODIES_PER_PANEL) {
+        return true;
+    }
+    return false;
 }
 
 std::string ComicScene::avatarNameForNick(const std::string &nick) const
@@ -204,16 +298,78 @@ std::vector<WrappedLine> ComicScene::wrapText(const std::string &text, int maxWi
     return out;
 }
 
-void ComicScene::layoutBalloon(SceneBalloon &b, const SceneBody &body)
+void ComicScene::layoutBalloon(SceneBalloon &b, const SceneBody &body, int balloonIndex,
+                               int balloonCount)
 {
     // Panel space: y=0 at top, y=-UNIT_PANEL_H at bottom (top > bottom).
-    // Size the text box from *current* font metrics (must match draw time).
     const int lineH = logicalLineHeight(m_fontPoint, m_layoutPxPerTwip);
     const int padX = std::max(180, lineH);
     const int padY = std::max(120, lineH * 2 / 3);
+    constexpr int kTopMargin = 160;
+    constexpr int kCloudExtra = 140;
+    constexpr int kTailGap = 240;
 
-    // Available width for wrapping (leave padding inside cloud)
-    const int maxTextW = UNIT_PANEL_W * 55 / 100;
+    b.speakerArrowX = body.arrowX;
+    b.speakerTop = body.box.top;
+
+    // ── Image photo frame (freeq media / bare image URL) ────────────────
+    if (b.hasImage()) {
+        const int iw = std::max(1, b.image.width());
+        const int ih = std::max(1, b.image.height());
+        // Fit into upper ~40% of panel, near speaker.
+        const int maxImgW = UNIT_PANEL_W * (balloonCount > 1 ? 38 : 55) / 100;
+        const int maxImgH = UNIT_PANEL_H * 34 / 100;
+        double scale = std::min(double(maxImgW) / iw, double(maxImgH) / ih);
+        scale = std::min(scale, 1.0);
+        int imgW = std::max(200, int(std::lround(iw * scale)));
+        int imgH = std::max(200, int(std::lround(ih * scale)));
+
+        const int captionLines =
+            (b.text.empty() ? 0 : std::max(1, (int)wrapText(b.text, maxImgW - 2 * padX).size())) +
+            (b.nick.empty() ? 0 : 1);
+        const int captionH = captionLines > 0 ? captionLines * lineH + padY : 0;
+        const int framePad = 120;
+        const int totalH = imgH + 2 * framePad + captionH;
+        const int totalW = imgW + 2 * framePad;
+
+        int cx = body.arrowX;
+        if (balloonCount > 1) {
+            const int spread = UNIT_PANEL_W * 8 / 100;
+            cx += (balloonIndex - (balloonCount - 1) / 2) *
+                  (spread / std::max(1, balloonCount - 1));
+        }
+        cx = std::max(totalW / 2 + 80, std::min(UNIT_PANEL_W - totalW / 2 - 80, cx));
+
+        int bot = body.box.top + kTailGap + balloonIndex * (totalH / 4);
+        int top = bot + totalH;
+        if (top > -kTopMargin) {
+            const int over = top - (-kTopMargin);
+            top -= over;
+            bot -= over;
+        }
+
+        b.cloudBox.left = cx - totalW / 2;
+        b.cloudBox.right = cx + totalW / 2;
+        b.cloudBox.top = top;
+        b.cloudBox.bottom = bot;
+
+        b.imageBox.left = b.cloudBox.left + framePad;
+        b.imageBox.right = b.cloudBox.right - framePad;
+        b.imageBox.top = b.cloudBox.top - framePad;
+        b.imageBox.bottom = b.imageBox.top - imgH;
+
+        b.textBox.left = b.imageBox.left;
+        b.textBox.right = b.imageBox.right;
+        b.textBox.top = b.imageBox.bottom - (captionH > 0 ? padY / 2 : 0);
+        b.textBox.bottom = b.cloudBox.bottom + framePad / 2;
+
+        b.lines = wrapText(b.text, imgW);
+        return;
+    }
+
+    // ── Text speech balloon ─────────────────────────────────────────────
+    const int widthCapPct = balloonCount > 2 ? 42 : (balloonCount > 1 ? 48 : 55);
+    const int maxTextW = UNIT_PANEL_W * widthCapPct / 100;
     b.lines = wrapText(b.text, maxTextW);
 
     int maxW = 0;
@@ -223,24 +379,26 @@ void ComicScene::layoutBalloon(SceneBalloon &b, const SceneBody &body)
     if (!b.nick.empty()) {
         maxW = std::max(maxW, measureLogical(b.nick + ":"));
     }
-    maxW = std::max(maxW, measureLogical("MM")); // minimum readable width
+    maxW = std::max(maxW, measureLogical("MM"));
 
     const int nTextLines =
         std::max(1, static_cast<int>(b.lines.size())) + (b.nick.empty() ? 0 : 1);
     int boxW = maxW + 2 * padX;
     int boxH = nTextLines * lineH + 2 * padY;
-    boxW = std::min(std::max(boxW, padX * 2 + 200), UNIT_PANEL_W * 78 / 100);
-    boxH = std::min(std::max(boxH, lineH * 2 + padY), UNIT_PANEL_H * 32 / 100);
+    const int maxBoxW = UNIT_PANEL_W * (balloonCount > 1 ? 48 : 78) / 100;
+    const int maxBoxH = UNIT_PANEL_H * (balloonCount > 2 ? 22 : 32) / 100;
+    boxW = std::min(std::max(boxW, padX * 2 + 200), maxBoxW);
+    boxH = std::min(std::max(boxH, lineH * 2 + padY), maxBoxH);
 
     int cx = body.arrowX;
-    cx = std::max(boxW / 2 + 160, std::min(UNIT_PANEL_W - boxW / 2 - 160, cx));
+    if (balloonCount > 1) {
+        const int spread = UNIT_PANEL_W * 6 / 100;
+        cx += (balloonIndex - (balloonCount - 1) / 2) * (spread / std::max(1, balloonCount - 1));
+    }
+    cx = std::max(boxW / 2 + 120, std::min(UNIT_PANEL_W - boxW / 2 - 120, cx));
 
-    constexpr int kTopMargin = 200;
-    constexpr int kCloudExtra = 140; // spline bulges past text box
-    constexpr int kTailGap = 280;
-
-    // Balloon bottom just above the head; top = bottom + height.
-    int bot = body.box.top + kTailGap;
+    const int stackLift = balloonIndex * (boxH / 3 + lineH / 2);
+    int bot = body.box.top + kTailGap + stackLift;
     int top = bot + boxH;
 
     if (top + kCloudExtra > -kTopMargin) {
@@ -249,7 +407,7 @@ void ComicScene::layoutBalloon(SceneBalloon &b, const SceneBody &body)
         bot -= overshoot;
     }
 
-    const int minBot = body.box.top + 100;
+    const int minBot = body.box.top + 80;
     if (bot < minBot) {
         bot = minBot;
         top = bot + boxH;
@@ -273,9 +431,7 @@ void ComicScene::layoutBalloon(SceneBalloon &b, const SceneBody &body)
     if (b.cloudBox.top > -kTopMargin) {
         b.cloudBox.top = -kTopMargin;
     }
-
-    b.speakerArrowX = body.arrowX;
-    b.speakerTop = body.box.top;
+    b.imageBox = {};
 }
 
 // Port of CBodyDouble::GetBodyBox into panel TWIPS (y: 0 top, -H bottom).
@@ -345,58 +501,198 @@ static void computeComplexBodyBoxes(const SceneBody &body, CPose *head, CPose *t
     torsoRect.bottom = torsoRect.top - torsoH;
 }
 
-void ComicScene::layoutPanel(ScenePanel &panel)
+void ComicScene::layoutOneBody(SceneBody &body, const RECT &client) const
 {
-    // Body uses lower ~half of panel (original maxBodyHeight ≈ unitH/1.9).
-    RECT client;
-    client.left = UNIT_PANEL_W / 10;
-    client.right = UNIT_PANEL_W - UNIT_PANEL_W / 10;
-    client.top = -UNIT_PANEL_H * 48 / 100;
-    client.bottom = -UNIT_PANEL_H + 100;
-
-    if (panel.body.type == AT_COMPLEX) {
-        CPose *head = GetPoseFromID(panel.body.facePose);
-        CPose *torso = GetPoseFromID(panel.body.torsoPose);
+    if (body.type == AT_COMPLEX) {
+        CPose *head = GetPoseFromID(body.facePose);
+        CPose *torso = GetPoseFromID(body.torsoPose);
         if (head && head->m_drawing && torso && torso->m_drawing) {
-            computeComplexBodyBoxes(panel.body, head, torso, client, panel.body.box,
-                                    panel.body.headBox, panel.body.torsoBox);
-            panel.body.arrowX = (panel.body.headBox.left + panel.body.headBox.right) / 2;
+            computeComplexBodyBoxes(body, head, torso, client, body.box, body.headBox,
+                                    body.torsoBox);
+            body.arrowX = (body.headBox.left + body.headBox.right) / 2;
         } else {
-            panel.body.box = client;
-            panel.body.arrowX = (client.left + client.right) / 2;
+            body.box = client;
+            body.arrowX = (client.left + client.right) / 2;
         }
+        return;
+    }
+
+    // AT_SIMPLE or AT_CUSTOM (rpg.actor sprite frame, etc.)
+    int iw = 0;
+    int ih = 0;
+    if (body.type == AT_CUSTOM && !body.customSprite.isNull()) {
+        iw = body.customSprite.width();
+        ih = body.customSprite.height();
     } else {
-        CPose *pose = GetPoseFromID(panel.body.bodyPose);
-        int bw = UNIT_PANEL_W / 3;
-        int bh = UNIT_PANEL_H * 10 / 19;
+        CPose *pose = GetPoseFromID(body.bodyPose);
         if (pose && pose->m_drawing && !pose->m_drawing->isNull()) {
-            const int iw = pose->m_drawing->width();
-            const int ih = pose->m_drawing->height();
-            if (ih > 0) {
+            iw = pose->m_drawing->width();
+            ih = pose->m_drawing->height();
+        }
+    }
+
+    int bw = (client.right - client.left) * 2 / 3;
+    int bh = client.top - client.bottom;
+    if (ih > 0 && iw > 0) {
+        bh = client.top - client.bottom;
+        // rpg.actor idle frames are square-ish; keep aspect, don't overfill width.
+        bw = std::max(200, iw * bh / ih);
+        if (body.type == AT_CUSTOM) {
+            // Pixel sprites read better a bit larger relative to slot.
+            bw = std::max(bw, (client.right - client.left) * 55 / 100);
+            bh = iw > 0 ? ih * bw / iw : bh;
+            if (bh > client.top - client.bottom) {
                 bh = client.top - client.bottom;
-                bw = std::max(200, iw * bh / ih);
-                if (bw > client.right - client.left) {
-                    bw = client.right - client.left;
-                    bh = iw > 0 ? ih * bw / iw : bh;
-                }
+                bw = ih > 0 ? iw * bh / ih : bw;
             }
         }
-        const int margin = (UNIT_PANEL_W - bw) / 2;
-        panel.body.box.left = margin;
-        panel.body.box.right = margin + bw;
-        panel.body.box.bottom = client.bottom;
-        panel.body.box.top = client.bottom + bh;
-        panel.body.arrowX = (panel.body.box.left + panel.body.box.right) / 2;
+        if (bw > client.right - client.left) {
+            bw = client.right - client.left;
+            bh = iw > 0 ? ih * bw / iw : bh;
+        }
+    }
+    const int slotW = client.right - client.left;
+    const int margin = client.left + (slotW - bw) / 2;
+    body.box.left = margin;
+    body.box.right = margin + bw;
+    body.box.bottom = client.bottom;
+    body.box.top = client.bottom + bh;
+    body.arrowX = (body.box.left + body.box.right) / 2;
+}
+
+// Port of CBodyDouble::FlipBodyBox, keeping left < right for our draw path.
+// Mirrors head/torso placement within the full body box (art faces the other way).
+static void flipComplexBodyBoxes(RECT &fullRect, RECT &headRect, RECT &torsoRect)
+{
+    auto mirrorX = [&](RECT &r) {
+        const int L = fullRect.left + fullRect.right - r.right;
+        const int R = fullRect.left + fullRect.right - r.left;
+        r.left = L;
+        r.right = R;
+    };
+    mirrorX(headRect);
+    mirrorX(torsoRect);
+}
+
+void ComicScene::applyBodyFlip(SceneBody &body) const
+{
+    if (!body.flip) {
+        return;
+    }
+    // Balloon tail still points at the (mirrored) head center.
+    if (body.type == AT_COMPLEX) {
+        flipComplexBodyBoxes(body.box, body.headBox, body.torsoBox);
+        body.arrowX = (body.headBox.left + body.headBox.right) / 2;
+    } else {
+        body.arrowX = body.box.left + body.box.right - body.arrowX;
+    }
+}
+
+void ComicScene::assignFacing(ScenePanel &panel) const
+{
+    const int n = static_cast<int>(panel.bodies.size());
+    if (n <= 0) {
+        return;
+    }
+    if (n == 1) {
+        // Solo: keep default art direction (face right / stage-left to camera).
+        panel.bodies[0].flip = false;
+        return;
     }
 
-    for (auto &bal : panel.balloons) {
-        layoutBalloon(bal, panel.body);
+    // Face toward the group's horizontal center so speakers look at each other.
+    // flip=false → natural art (faces right); flip=true → mirrored (faces left).
+    long sumCx = 0;
+    for (const auto &b : panel.bodies) {
+        sumCx += (b.box.left + b.box.right) / 2;
     }
+    const int mid = static_cast<int>(sumCx / n);
+
+    for (int i = 0; i < n; ++i) {
+        SceneBody &b = panel.bodies[static_cast<size_t>(i)];
+        const int cx = (b.box.left + b.box.right) / 2;
+        if (cx < mid) {
+            b.flip = false; // left of center → face right (inward)
+        } else if (cx > mid) {
+            b.flip = true; // right of center → face left (inward)
+        } else {
+            // Dead center: face the more crowded side, prefer facing right.
+            b.flip = (i >= n / 2);
+        }
+    }
+}
+
+void ComicScene::layoutBalloons(ScenePanel &panel)
+{
+    const int nBal = static_cast<int>(panel.balloons.size());
+    for (int i = 0; i < nBal; ++i) {
+        SceneBalloon &bal = panel.balloons[static_cast<size_t>(i)];
+        int bi = findBodyIndex(panel, bal.nick);
+        if (bi < 0 && !panel.bodies.empty()) {
+            bi = 0; // fallback: first body
+        }
+        if (bi < 0) {
+            continue;
+        }
+        layoutBalloon(bal, panel.bodies[static_cast<size_t>(bi)], i, nBal);
+    }
+}
+
+void ComicScene::layoutPanel(ScenePanel &panel)
+{
+    const int n = static_cast<int>(panel.bodies.size());
+    if (n <= 0) {
+        return;
+    }
+
+    // Bodies stand in the lower ~half (original maxBodyHeight ≈ unitH/1.9).
+    // With multiple characters, give each a horizontal slot with margins between.
+    const int maxBodyH = UNIT_PANEL_H * 52 / 100;
+    const int bottomY = -UNIT_PANEL_H + 100;
+    const int topY = bottomY + maxBodyH;
+
+    // Scale figures down a bit when crowded so they fit side-by-side.
+    const double crowd = n <= 1 ? 1.0 : (n == 2 ? 0.92 : (n == 3 ? 0.85 : 0.78));
+    const int edge = std::max(80, UNIT_PANEL_W / (12 + n));
+    const int gap = std::max(40, UNIT_PANEL_W / (20 + n * 4));
+    const int usable = UNIT_PANEL_W - 2 * edge - (n - 1) * gap;
+    const int slotW = std::max(400, usable / n);
+
+    for (int i = 0; i < n; ++i) {
+        RECT client;
+        client.left = edge + i * (slotW + gap);
+        client.right = client.left + slotW;
+        // Slight height shrink for crowded casts (same bottom, lower top).
+        const int h = static_cast<int>(std::lround((topY - bottomY) * crowd));
+        client.bottom = bottomY;
+        client.top = bottomY + h;
+        layoutOneBody(panel.bodies[static_cast<size_t>(i)], client);
+    }
+
+    // Who faces whom (m_flip in the original), then mirror boxes + art.
+    assignFacing(panel);
+    for (auto &body : panel.bodies) {
+        applyBodyFlip(body);
+    }
+
+    layoutBalloons(panel);
 }
 
 void ComicScene::addLine(const std::string &text, UCHAR mode, const std::string &nick)
 {
-    if (text.empty() || m_avatars.empty()) {
+    if (text.empty()) {
+        return;
+    }
+    addImageLine(ComicImage{}, text, mode, nick);
+}
+
+void ComicScene::addImageLine(const ComicImage &image, const std::string &caption, UCHAR mode,
+                              const std::string &nick)
+{
+    if (image.isNull() && caption.empty()) {
+        return;
+    }
+    if (m_avatars.empty() && m_nickRpgSprites.empty()) {
         return;
     }
     if (m_layoutPxPerTwip <= 0.0) {
@@ -404,27 +700,52 @@ void ComicScene::addLine(const std::string &text, UCHAR mode, const std::string 
     }
 
     const std::string who = nick.empty() ? "you" : nick;
-    const int avIdx = assignAvatarIndex(who);
-    if (avIdx < 0) {
+    SceneBody speaker = bodyForNick(who);
+    if (speaker.type != AT_CUSTOM && speaker.type != AT_SIMPLE && speaker.type != AT_COMPLEX) {
         return;
     }
-    const LoadedAvatar &av = m_avatars[static_cast<size_t>(avIdx)];
-
-    ScenePanel panel;
-    panel.seed = static_cast<unsigned>(m_panels.size() + 1);
-    panel.body = bodyFromAvatar(av);
 
     SceneBalloon bal;
-    bal.text = text;
+    bal.text = caption;
     bal.nick = who;
     bal.mode = mode;
-    panel.balloons.push_back(std::move(bal));
+    if (!image.isNull()) {
+        bal.image = image;
+    }
 
-    layoutPanel(panel);
-    m_panels.push_back(std::move(panel));
-    m_status = "Panels: " + std::to_string(m_panels.size()) + " | " + who + " → " +
-               av.name + " (" + std::to_string(m_nickToAvatar.size()) + " speakers, " +
-               std::to_string(m_avatars.size()) + " cast)";
+    if (shouldStartNewPanel(who)) {
+        ScenePanel panel;
+        panel.seed = static_cast<unsigned>(m_panels.size() + 1);
+        panel.bodies.push_back(std::move(speaker));
+        panel.balloons.push_back(std::move(bal));
+        layoutPanel(panel);
+        m_panels.push_back(std::move(panel));
+    } else {
+        ScenePanel &panel = m_panels.back();
+        if (findBodyIndex(panel, who) < 0) {
+            panel.bodies.push_back(std::move(speaker));
+        }
+        panel.balloons.push_back(std::move(bal));
+        layoutPanel(panel);
+    }
+
+    const ScenePanel &last = m_panels.back();
+    std::string label = who;
+    const int bi = findBodyIndex(last, who);
+    if (bi >= 0) {
+        label = last.bodies[static_cast<size_t>(bi)].avatarName;
+        if (label.empty()) {
+            label = who;
+        }
+    }
+    const bool rpg = hasRpgSpriteForNick(who);
+    const bool img = !image.isNull();
+    m_status = "Panels: " + std::to_string(m_panels.size()) + " | frame " +
+               std::to_string(last.bodies.size()) + " chars / " +
+               std::to_string(last.balloons.size()) + " lines | " + who + " → " + label +
+               (rpg ? " [rpg.actor]" : "") + (img ? " [img]" : "") + " (" +
+               std::to_string(m_nickToAvatar.size() + m_nickRpgSprites.size()) +
+               " speakers, " + std::to_string(m_avatars.size()) + " cast)";
 }
 
 void ComicScene::drawBody(ICanvas *canvas, const SceneBody &body) const
@@ -438,9 +759,28 @@ void ComicScene::drawBody(ICanvas *canvas, const SceneBody &body) const
         if (w <= 0 || h <= 0) {
             return;
         }
-        // drawMasked expects dest rect with y = bottom of image in our flipped space
-        pose->drawMasked(canvas, r.left, r.bottom, w, h);
+        // drawMasked expects dest rect with y = bottom of image in our flipped space.
+        // body.flip mirrors the sprite (classic Comic Chat facing).
+        pose->drawMasked(canvas, r.left, r.bottom, w, h, body.flip);
     };
+
+    if (body.type == AT_CUSTOM) {
+        if (body.customSprite.isNull()) {
+            return;
+        }
+        const int w = body.box.right - body.box.left;
+        const int h = body.box.top - body.box.bottom;
+        if (w <= 0 || h <= 0) {
+            return;
+        }
+        ComicImage tmp = body.customSprite;
+        if (body.flip && !tmp.isNull()) {
+            tmp.qimage() = tmp.qimage().flipped(Qt::Horizontal);
+        }
+        // Pixel art: draw without mask processing (already RGBA with alpha).
+        tmp.draw(canvas, body.box.left, body.box.bottom, w, h);
+        return;
+    }
 
     if (body.type == AT_COMPLEX) {
         CPose *torso = GetPoseFromID(body.torsoPose);
@@ -467,8 +807,64 @@ void ComicScene::drawBalloon(ICanvas *canvas, const SceneBalloon &b) const
     const int Btm = b.cloudBox.bottom;
     const int mx = (L + R) / 2;
     const int my = (T + Btm) / 2;
-    const int dx = (R - L) / 4;
+    const int lineH = logicalLineHeight(m_fontPoint, m_layoutPxPerTwip);
 
+    if (b.hasImage()) {
+        // Photo frame: white card + black border + image + optional caption.
+        RECT frame{L, T, R, Btm};
+        canvas->setBrush(CanvasColor::rgb(255, 255, 255));
+        canvas->setPen(CanvasColor::rgb(20, 20, 20), 40);
+        canvas->fillRect(frame);
+        canvas->drawRect(frame);
+
+        // Tail pointing at speaker
+        canvas->setBrush(CanvasColor::rgb(255, 255, 255));
+        canvas->beginPath();
+        canvas->moveTo(mx - 100, Btm);
+        canvas->lineTo(b.speakerArrowX, b.speakerTop + 120);
+        canvas->lineTo(mx + 100, Btm);
+        canvas->closePath();
+        canvas->strokeAndFill();
+
+        const int iw = b.imageBox.right - b.imageBox.left;
+        const int ih = b.imageBox.top - b.imageBox.bottom;
+        if (iw > 0 && ih > 0 && !b.image.isNull()) {
+            // Thin inner border
+            RECT ir = b.imageBox;
+            ir.left -= 20;
+            ir.right += 20;
+            ir.top += 20;
+            ir.bottom -= 20;
+            canvas->setPen(CanvasColor::rgb(40, 40, 40), 24);
+            canvas->setNoBrush();
+            canvas->drawRect(ir);
+            b.image.draw(canvas, b.imageBox.left, b.imageBox.bottom, iw, ih);
+        }
+
+        // Nick + caption under photo
+        canvas->setFont("Sans Serif", m_fontPoint, false);
+        canvas->setPen(CanvasColor::rgb(0, 0, 0), 1);
+        int y = b.imageBox.bottom - lineH;
+        if (!b.nick.empty()) {
+            canvas->setFont("Sans Serif", std::max(8, m_fontPoint - 1), true);
+            canvas->setPen(CanvasColor::rgb(40, 40, 120), 1);
+            const std::string label = b.nick + ":";
+            const int lw = measureLogical(label);
+            canvas->drawText((b.textBox.left + b.textBox.right - lw) / 2, y, label);
+            canvas->setFont("Sans Serif", m_fontPoint, false);
+            canvas->setPen(CanvasColor::rgb(0, 0, 0), 1);
+            y -= lineH;
+        }
+        for (const auto &ln : b.lines) {
+            const int x = (b.textBox.left + b.textBox.right - ln.width) / 2;
+            canvas->drawText(x, y, ln.text);
+            y -= lineH;
+        }
+        return;
+    }
+
+    // Cloud speech balloon
+    const int dx = (R - L) / 4;
     POINT cps[8] = {
         {L, my}, {L + dx / 2, T}, {mx, T}, {R - dx / 2, T},
         {R, my}, {R - dx / 2, Btm}, {mx, Btm}, {L + dx / 2, Btm},
@@ -484,7 +880,6 @@ void ComicScene::drawBalloon(ICanvas *canvas, const SceneBalloon &b) const
     canvas->closePath();
     canvas->strokeAndFill();
 
-    // Tail
     canvas->beginPath();
     canvas->moveTo(mx - 100, Btm);
     canvas->lineTo(b.speakerArrowX, b.speakerTop + 120);
@@ -492,12 +887,8 @@ void ComicScene::drawBalloon(ICanvas *canvas, const SceneBalloon &b) const
     canvas->closePath();
     canvas->strokeAndFill();
 
-    // Text: use the same point size / metrics that layoutBalloon used.
-    // Baseline steps downward (more negative y) each line.
     canvas->setFont("Sans Serif", m_fontPoint, false);
     canvas->setPen(CanvasColor::rgb(0, 0, 0), 1);
-    const int lineH = logicalLineHeight(m_fontPoint, m_layoutPxPerTwip);
-    // First baseline inset from top of text box
     int y = b.textBox.top - lineH * 85 / 100;
     if (!b.nick.empty()) {
         canvas->setFont("Sans Serif", std::max(8, m_fontPoint - 1), true);
@@ -536,7 +927,10 @@ void ComicScene::drawPanel(ICanvas *canvas, const ScenePanel &panel, const RECT 
     canvas->setNoBrush();
     canvas->drawRect(full);
 
-    drawBody(canvas, panel.body);
+    // Draw bodies first (behind balloons), left-to-right as laid out.
+    for (const auto &body : panel.bodies) {
+        drawBody(canvas, body);
+    }
     for (const auto &bal : panel.balloons) {
         drawBalloon(canvas, bal);
     }

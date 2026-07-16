@@ -26,8 +26,13 @@ public:
 
     // Load a full BMP/DIB from a filesystem path.
     bool loadFile(const std::string &path);
+    // Load any format QImage understands (PNG/JPEG/…) from memory.
+    bool loadFromData(const unsigned char *data, int size, const char *formatHint = nullptr);
     // Load a BMP stream starting at the current FILE position (used inside .avb).
     bool loadFromBmpStream(FILE *fp);
+
+    // Replace contents with a QImage (ARGB32).
+    void setQImage(QImage img);
 
     // Comic Chat GDI-style masks: white in mask = transparent, black = keep.
     void applyMask(const ComicImage &mask);

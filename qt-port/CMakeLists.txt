@@ -43,13 +43,22 @@ target_compile_definitions(comic_engine PRIVATE
     COMIC_ART_DIR="${COMIC_ART_DIR}"
 )
 
+add_library(comic_net STATIC
+    net/IrcClient.cpp
+    net/RpgActorClient.cpp
+    net/FreeqAuth.cpp
+)
+target_include_directories(comic_net PUBLIC
+    ${CMAKE_CURRENT_SOURCE_DIR}
+)
+target_link_libraries(comic_net PUBLIC comic_engine Qt6::Network Qt6::Widgets)
+
 add_executable(comic-chat-qt
     app/main.cpp
     app/MainWindow.cpp
     app/ComicWidget.cpp
-    net/IrcClient.cpp
 )
-target_link_libraries(comic-chat-qt PRIVATE comic_engine comic_platform Qt6::Widgets Qt6::Network)
+target_link_libraries(comic-chat-qt PRIVATE comic_engine comic_platform comic_net Qt6::Widgets Qt6::Network)
 target_compile_definitions(comic-chat-qt PRIVATE
     COMIC_ART_DIR="${COMIC_ART_DIR}"
 )

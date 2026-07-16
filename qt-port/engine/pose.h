@@ -25,7 +25,9 @@ public:
     ~CPose();
 
     // Composite drawing+mask into ARGB and blit.
-    void drawMasked(ICanvas *canvas, int x, int y, int w, int h) const;
+    // flipH mirrors the figure so characters can face each other.
+    void drawMasked(ICanvas *canvas, int x, int y, int w, int h,
+                    bool flipH = false) const;
 };
 
 void setAvatarArtDir(const std::string &dir);
