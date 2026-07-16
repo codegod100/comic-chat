@@ -254,7 +254,11 @@ void QtCanvas::drawImage(const IImage &img, int destX, int destY)
         return;
     }
     const QImage &src = qi->qimage();
+    m_painter->save();
+    m_painter->setRenderHint(QPainter::SmoothPixmapTransform, false);
+    m_painter->setCompositionMode(QPainter::CompositionMode_SourceOver);
     m_painter->drawImage(mapPoint(destX, destY), src);
+    m_painter->restore();
 }
 
 void QtCanvas::drawImage(const IImage &img,
@@ -265,7 +269,11 @@ void QtCanvas::drawImage(const IImage &img,
         return;
     }
     const RECT r{destX, destY, destX + destW, destY + destH};
+    m_painter->save();
+    m_painter->setRenderHint(QPainter::SmoothPixmapTransform, false);
+    m_painter->setCompositionMode(QPainter::CompositionMode_SourceOver);
     m_painter->drawImage(mapRect(r), qi->qimage());
+    m_painter->restore();
 }
 
 void QtCanvas::drawImageKeyed(const IImage &img,

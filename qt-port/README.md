@@ -36,7 +36,7 @@ nix-shell -p cmake qt6.qtbase qt6.qttools ninja --run '
 
 Use the top bar: host, port, nick, channel, **TLS** checkbox, Connect.
 
-- Example: `irc.libera.chat` / `6697` / TLS on / `#yourchannel`
+- Example: `irc.freeq.at` / `6697` / TLS on / `#comicchat`
 - Offline: leave disconnected and type in the say box (local panels only)
 - Incoming `PRIVMSG` becomes a new comic panel with the speaker nick
 

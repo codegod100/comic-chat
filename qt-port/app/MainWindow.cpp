@@ -42,7 +42,7 @@ MainWindow::MainWindow(QWidget *parent)
     auto *ircBox = new QGroupBox(QStringLiteral("IRC"), central);
     auto *ircForm = new QHBoxLayout(ircBox);
 
-    m_host = new QLineEdit(QStringLiteral("irc.libera.chat"), ircBox);
+    m_host = new QLineEdit(QStringLiteral("irc.freeq.at"), ircBox);
     m_host->setPlaceholderText(QStringLiteral("host"));
     m_port = new QLineEdit(QStringLiteral("6697"), ircBox);
     m_port->setMaximumWidth(70);

@@ -86,8 +86,8 @@ void ComicImage::applyMask(const ComicImage &mask)
     if (m_img.isNull() || mask.isNull()) {
         return;
     }
-    // Comic Chat 1bpp masks: palette 0=white (transparent region), 1=black (keep).
-    // After QImage load, white areas are the background → punch those out.
+    // Comic Chat 1bpp masks: palette 0=white (outside), 1=black (character).
+    // Keep only ink inside the mask; force solid black so fills are opaque.
     QImage m = mask.qimage().convertToFormat(QImage::Format_ARGB32);
     m_img = m_img.convertToFormat(QImage::Format_ARGB32);
     if (m.size() != m_img.size()) {
@@ -99,12 +99,13 @@ void ComicImage::applyMask(const ComicImage &mask)
         auto *dst = reinterpret_cast<QRgb *>(m_img.scanLine(y));
         const auto *src = reinterpret_cast<const QRgb *>(m.constScanLine(y));
         for (int x = 0; x < w; ++x) {
-            const int gray = qGray(src[x]);
-            if (gray > 128) {
-                // White / light in mask → transparent (outside character)
+            const int maskGray = qGray(src[x]);
+            const int inkGray = qGray(dst[x]);
+            if (maskGray > 128 || inkGray >= 250) {
                 dst[x] = qRgba(0, 0, 0, 0);
+            } else {
+                dst[x] = qRgba(0, 0, 0, 255);
             }
-            // Black / dark → keep drawing pixel (character)
         }
     }
 }
@@ -133,14 +134,19 @@ void ComicImage::makeWhiteTransparent(int threshold)
     if (m_img.isNull()) {
         return;
     }
+    // Comic Chat avatars are 1bpp black ink on white. GDI draws them with
+    // SRCAND so white is clear and black is solid ink. Mirror that: pure
+    // white → transparent; everything else → fully opaque black (no
+    // see-through gray fills).
     m_img = m_img.convertToFormat(QImage::Format_ARGB32);
     for (int y = 0; y < m_img.height(); ++y) {
         auto *line = reinterpret_cast<QRgb *>(m_img.scanLine(y));
         for (int x = 0; x < m_img.width(); ++x) {
-            // GDI SRCAND line art: white background shows through.
             if (qRed(line[x]) >= threshold && qGreen(line[x]) >= threshold &&
                 qBlue(line[x]) >= threshold) {
                 line[x] = qRgba(0, 0, 0, 0);
+            } else {
+                line[x] = qRgba(0, 0, 0, 255);
             }
         }
     }

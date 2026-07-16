@@ -153,16 +153,19 @@ static void computeComplexBodyBoxes(const SceneBody &body, CPose *head, CPose *t
     const int bitW = std::max(1, bitR - bitL);
     const int bitH = std::max(1, bitB - bitT);
 
-    // client in panel space: top > bottom numerically? top=0, bottom=-H
+    // client in panel space: top=0, bottom=-H
     const int clientW = clientRect.right - clientRect.left;
     const int clientH = clientRect.top - clientRect.bottom; // positive height
-    const double scale = std::min(double(clientW) / bitW, double(clientH) / bitH);
+    // Fit in client, then shrink so the figure isn't panel-filling.
+    // Original max was ~unitHeight/1.9; we keep ~38% of panel height.
+    double scale = std::min(double(clientW) / bitW, double(clientH) / bitH);
+    scale *= 0.72;
     const int fullW = std::max(1, int(std::lround(scale * bitW)));
     const int fullH = std::max(1, int(std::lround(scale * bitH)));
 
-    // Center on bottom of client (original GetBodyBox)
+    // Center horizontally; stand on the bottom of the client region.
     fullRect.left = clientRect.left + (clientW - fullW) / 2;
-    fullRect.bottom = clientRect.bottom;
+    fullRect.bottom = clientRect.bottom + 40;
     fullRect.top = fullRect.bottom + fullH;
     fullRect.right = fullRect.left + fullW;
 
@@ -195,12 +198,12 @@ static void computeComplexBodyBoxes(const SceneBody &body, CPose *head, CPose *t
 
 void ComicScene::layoutPanel(ScenePanel &panel)
 {
-    // Client region for body: lower ~half of panel
+    // Client region for body: lower ~45% of panel (leave room for balloons).
     RECT client;
-    client.left = UNIT_PANEL_W / 10;
-    client.right = UNIT_PANEL_W - UNIT_PANEL_W / 10;
-    client.top = -UNIT_PANEL_H / 2;
-    client.bottom = -UNIT_PANEL_H + 80;
+    client.left = UNIT_PANEL_W / 8;
+    client.right = UNIT_PANEL_W - UNIT_PANEL_W / 8;
+    client.top = -UNIT_PANEL_H * 55 / 100;
+    client.bottom = -UNIT_PANEL_H + 120;
 
     if (panel.body.type == AT_COMPLEX) {
         CPose *head = GetPoseFromID(panel.body.facePose);
