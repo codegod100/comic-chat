@@ -167,7 +167,7 @@ void ComicScene::layoutPanel(ScenePanel &panel)
     }
 }
 
-void ComicScene::addLine(const std::string &text, UCHAR mode)
+void ComicScene::addLine(const std::string &text, UCHAR mode, const std::string &nick)
 {
     if (text.empty()) {
         return;
@@ -194,6 +194,7 @@ void ComicScene::addLine(const std::string &text, UCHAR mode)
 
     SceneBalloon bal;
     bal.text = text;
+    bal.nick = nick.empty() ? "you" : nick;
     bal.mode = mode;
     panel.balloons.push_back(std::move(bal));
 
@@ -275,6 +276,16 @@ void ComicScene::drawBalloon(ICanvas *canvas, const SceneBalloon &b) const
     canvas->setPen(CanvasColor::rgb(0, 0, 0), 1);
     const int lineH = logicalLineHeight(m_fontPoint, m_layoutPxPerTwip);
     int y = b.textBox.top - lineH; // first baseline
+    if (!b.nick.empty()) {
+        canvas->setFont("Sans Serif", std::max(8, m_fontPoint - 2), true);
+        canvas->setPen(CanvasColor::rgb(40, 40, 120), 1);
+        const std::string label = b.nick + ":";
+        const int lw = measureLogical(label);
+        canvas->drawText((b.textBox.left + b.textBox.right - lw) / 2, y + lineH / 3, label);
+        canvas->setFont("Sans Serif", m_fontPoint, false);
+        canvas->setPen(CanvasColor::rgb(0, 0, 0), 1);
+        y -= lineH * 2 / 3;
+    }
     for (const auto &ln : b.lines) {
         const int x = (b.textBox.left + b.textBox.right - ln.width) / 2;
         canvas->drawText(x, y, ln.text);

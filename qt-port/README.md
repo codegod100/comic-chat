@@ -12,8 +12,8 @@ does **not** use MFC or the Visual Studio toolchain.
 | 1 | Math + spline draw | **done** (vector2d, bbox, pe, traj, arc, spline) |
 | 2 | `.avb` + backdrop load | **done** (image, pose, avatario, backdrop) |
 | 3 | Panel layout from chat lines | **done** (`ComicScene` AddLine → panels) |
-| 4 | Main window shell (local say box) | planned |
-| 5 | IRC (`QTcpSocket` / TLS) | planned |
+| 4 | Main window shell (local say box) | **done** |
+| 5 | IRC (`QTcpSocket` / TLS) | **done** (`net/IrcClient`) |
 
 Source engine: primarily [`v1.0-pre-modern/`](../v1.0-pre-modern/).
 
@@ -31,6 +31,15 @@ nix-shell -p cmake qt6.qtbase qt6.qttools ninja --run '
 '
 ./build/comic-chat-qt
 ```
+
+### IRC
+
+Use the top bar: host, port, nick, channel, **TLS** checkbox, Connect.
+
+- Example: `irc.libera.chat` / `6697` / TLS on / `#yourchannel`
+- Offline: leave disconnected and type in the say box (local panels only)
+- Incoming `PRIVMSG` becomes a new comic panel with the speaker nick
+
 
 ### Distro packages
 

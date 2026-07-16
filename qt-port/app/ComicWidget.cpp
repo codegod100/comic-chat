@@ -21,14 +21,15 @@ ComicWidget::ComicWidget(QWidget *parent)
     setAutoFillBackground(true);
 }
 
-void ComicWidget::addChatLine(const QString &text)
+void ComicWidget::addChatLine(const QString &text, const QString &nick)
 {
     ensureAssetsLoaded();
     if (!m_assetsOk) {
         update();
         return;
     }
-    m_scene.addLine(text.toStdString(), SM_SAY);
+    const QString who = nick.isEmpty() ? QStringLiteral("you") : nick;
+    m_scene.addLine(text.toStdString(), SM_SAY, who.toStdString());
     update();
 }
 

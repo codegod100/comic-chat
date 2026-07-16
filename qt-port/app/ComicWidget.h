@@ -13,7 +13,7 @@ class ComicWidget : public QWidget {
 public:
     explicit ComicWidget(QWidget *parent = nullptr);
 
-    void addChatLine(const QString &text);
+    void addChatLine(const QString &text, const QString &nick = QStringLiteral("you"));
     void clearPanels();
     QString statusLine() const;
 

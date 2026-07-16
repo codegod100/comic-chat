@@ -29,6 +29,7 @@ struct WrappedLine {
 
 struct SceneBalloon {
     std::string text;
+    std::string nick;
     UCHAR mode = SM_SAY;
     std::vector<WrappedLine> lines;
     RECT textBox{};   // panel-local TWIPS (y-down-negative: top=0, bottom=-H)
@@ -60,8 +61,9 @@ public:
     void setArt(const LoadedAvatar &avatar, const ComicImage &backdrop);
     void clear();
 
-    // Add a spoken line (local nick "you" for now). Creates/extends panels.
-    void addLine(const std::string &text, UCHAR mode = SM_SAY);
+    // Add a spoken line. Creates a new panel. nick is shown in the balloon label.
+    void addLine(const std::string &text, UCHAR mode = SM_SAY,
+                 const std::string &nick = "you");
 
     int panelCount() const { return static_cast<int>(m_panels.size()); }
     int unitWidth() const { return UNIT_PANEL_W; }

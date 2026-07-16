@@ -7,7 +7,7 @@ set(CMAKE_AUTOMOC ON)
 set(CMAKE_AUTORCC ON)
 set(CMAKE_AUTOUIC ON)
 
-find_package(Qt6 REQUIRED COMPONENTS Widgets)
+find_package(Qt6 REQUIRED COMPONENTS Widgets Network)
 
 # Default art path: sibling modern tree (override with -DCOMIC_ART_DIR=...)
 set(COMIC_ART_DIR "${CMAKE_SOURCE_DIR}/../v1.0-pre-modern/comicart"
@@ -47,8 +47,9 @@ add_executable(comic-chat-qt
     app/main.cpp
     app/MainWindow.cpp
     app/ComicWidget.cpp
+    net/IrcClient.cpp
 )
-target_link_libraries(comic-chat-qt PRIVATE comic_engine comic_platform Qt6::Widgets)
+target_link_libraries(comic-chat-qt PRIVATE comic_engine comic_platform Qt6::Widgets Qt6::Network)
 target_compile_definitions(comic-chat-qt PRIVATE
     COMIC_ART_DIR="${COMIC_ART_DIR}"
 )
