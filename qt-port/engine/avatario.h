@@ -8,15 +8,40 @@
 #include <string>
 #include <vector>
 
-// Minimal avatar summary for Phase 2 (full CAvatarX hierarchy comes later).
+// Placement record from .avb (matches FACEREC / BODYREC fields we need).
+struct FaceRec {
+    USHORT poseID = 0;
+    short xCX = 0;
+    short yCX = 0;
+    short delta_xCX = 0;
+    short delta_yCX = 0;
+    UCHAR faceX = 0;
+    UCHAR faceY = 0;
+};
+
+struct TorsoRec {
+    USHORT poseID = 0;
+    short xCX = 0;
+    short yCX = 0;
+};
+
+struct BodyRec {
+    USHORT poseID = 0;
+    UCHAR faceX = 0;
+    UCHAR faceY = 0;
+};
+
+// Minimal avatar summary for the Qt port.
 struct LoadedAvatar {
     std::string name;
     int type = 0; // AT_SIMPLE / AT_COMPLEX
     USHORT iconPose = 0;
-    // Simple: body poses. Complex: face + torso first entries for demo.
-    std::vector<USHORT> bodyPoses;
+    std::vector<USHORT> bodyPoses; // legacy simple pose ids
     std::vector<USHORT> facePoses;
     std::vector<USHORT> torsoPoses;
+    std::vector<FaceRec> faces;
+    std::vector<TorsoRec> torsos;
+    std::vector<BodyRec> bodies;
     UCHAR flags = 0;
 };
 
@@ -33,9 +58,10 @@ struct LoadedAvatar {
 #define AT_SIMPLE 1
 #define AT_COMPLEX 2
 
-// Load avatar by base name (e.g. "anna", "glenda") from avatarArtDir().
-// Returns false on failure.
-bool LoadAvatarInfo(const std::string &baseName, LoadedAvatar &out);
+// avatar flags (from original avatar.h)
+#define HEADMASK 1
+#define TORSOMASK 2
+#define TORSOFIRST 4
 
-// Prefer a complex character if available, else any .avb.
+bool LoadAvatarInfo(const std::string &baseName, LoadedAvatar &out);
 bool LoadDemoAvatar(LoadedAvatar &out);

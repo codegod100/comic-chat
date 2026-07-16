@@ -29,12 +29,16 @@ public:
     // Load a BMP stream starting at the current FILE position (used inside .avb).
     bool loadFromBmpStream(FILE *fp);
 
-    // Apply a 1-bit / gray mask: black in mask => transparent.
+    // Comic Chat GDI-style masks: white in mask = transparent, black = keep.
     void applyMask(const ComicImage &mask);
-    // Color-key transparency.
+    // Color-key transparency (exact RGB).
     void makeColorKey(COLORREF key);
+    // Treat near-white pixels as transparent (1bpp line art / SRCAND style).
+    void makeWhiteTransparent(int threshold = 250);
 
     // Draw helpers onto ICanvas (expects QtCanvas under the hood).
+    // x,y = top-left of destination in canvas logical coords when scale is +Y-down;
+    // with ComicScene's flipped Y, callers pass bottom-left and positive h carefully.
     void draw(ICanvas *canvas, int x, int y) const;
     void draw(ICanvas *canvas, int x, int y, int w, int h) const;
 

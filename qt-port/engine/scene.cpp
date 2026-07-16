@@ -130,37 +130,112 @@ void ComicScene::layoutBalloon(SceneBalloon &b, const SceneBody &body)
     b.speakerTop = body.box.top;
 }
 
+// Port of CBodyDouble::GetBodyBox into panel TWIPS (y: 0 top, -H bottom).
+// Bitmap coords: origin top-left, y down. We map into clientRect with same convention
+// then flip into panel space.
+static void computeComplexBodyBoxes(const SceneBody &body, CPose *head, CPose *torso,
+                                    const RECT &clientRect, // top=0 bottom=-H style
+                                    RECT &fullRect, RECT &headRect, RECT &torsoRect)
+{
+    const int hw = head->m_drawing->width();
+    const int hh = head->m_drawing->height();
+    const int tw = torso->m_drawing->width();
+    const int th = torso->m_drawing->height();
+
+    const int xOffset = body.torso_xCX + body.face_dx - body.face_xCX;
+    const int yOffset = body.torso_yCX + body.face_dy - body.face_yCX;
+
+    // bitRect in bitmap space (y down)
+    const int bitL = std::min(0, xOffset);
+    const int bitR = std::max(tw, xOffset + hw);
+    const int bitT = std::min(0, yOffset);
+    const int bitB = std::max(th, yOffset + hh);
+    const int bitW = std::max(1, bitR - bitL);
+    const int bitH = std::max(1, bitB - bitT);
+
+    // client in panel space: top > bottom numerically? top=0, bottom=-H
+    const int clientW = clientRect.right - clientRect.left;
+    const int clientH = clientRect.top - clientRect.bottom; // positive height
+    const double scale = std::min(double(clientW) / bitW, double(clientH) / bitH);
+    const int fullW = std::max(1, int(std::lround(scale * bitW)));
+    const int fullH = std::max(1, int(std::lround(scale * bitH)));
+
+    // Center on bottom of client (original GetBodyBox)
+    fullRect.left = clientRect.left + (clientW - fullW) / 2;
+    fullRect.bottom = clientRect.bottom;
+    fullRect.top = fullRect.bottom + fullH;
+    fullRect.right = fullRect.left + fullW;
+
+    // Head position within full box (bitmap y-down → panel y-up via fullRect.top - ...)
+    // In original MM_TWIPS, top is less negative; they used:
+    // headRect.top = ROUND((yOffset - bitRect.top) * scale) + fullRect.top
+    // with heightSign. We use: bitmap dy from top of bitRect maps down from fullRect.top.
+    const int headBmpX = xOffset - bitL;
+    const int headBmpY = yOffset - bitT;
+    const int torsoBmpX = 0 - bitL;
+    const int torsoBmpY = 0 - bitT;
+
+    const int headW = std::max(1, int(std::lround(hw * scale)));
+    const int headH = std::max(1, int(std::lround(hh * scale)));
+    const int torsoW = std::max(1, int(std::lround(tw * scale)));
+    const int torsoH = std::max(1, int(std::lround(th * scale)));
+
+    headRect.left = fullRect.left + int(std::lround(headBmpX * scale));
+    headRect.right = headRect.left + headW;
+    // bitmap y increases downward; panel y increases upward from bottom
+    // top of full bitmap → fullRect.top; +bmpY goes toward bottom
+    headRect.top = fullRect.top - int(std::lround(headBmpY * scale));
+    headRect.bottom = headRect.top - headH;
+
+    torsoRect.left = fullRect.left + int(std::lround(torsoBmpX * scale));
+    torsoRect.right = torsoRect.left + torsoW;
+    torsoRect.top = fullRect.top - int(std::lround(torsoBmpY * scale));
+    torsoRect.bottom = torsoRect.top - torsoH;
+}
+
 void ComicScene::layoutPanel(ScenePanel &panel)
 {
-    const int maxBodyH = UNIT_PANEL_H * 10 / 19;
-    int bw = UNIT_PANEL_W / 3;
-    int bh = maxBodyH;
+    // Client region for body: lower ~half of panel
+    RECT client;
+    client.left = UNIT_PANEL_W / 10;
+    client.right = UNIT_PANEL_W - UNIT_PANEL_W / 10;
+    client.top = -UNIT_PANEL_H / 2;
+    client.bottom = -UNIT_PANEL_H + 80;
 
-    CPose *pose = nullptr;
     if (panel.body.type == AT_COMPLEX) {
-        pose = GetPoseFromID(panel.body.torsoPose);
+        CPose *head = GetPoseFromID(panel.body.facePose);
+        CPose *torso = GetPoseFromID(panel.body.torsoPose);
+        if (head && head->m_drawing && torso && torso->m_drawing) {
+            computeComplexBodyBoxes(panel.body, head, torso, client, panel.body.box,
+                                    panel.body.headBox, panel.body.torsoBox);
+            panel.body.arrowX = (panel.body.headBox.left + panel.body.headBox.right) / 2;
+        } else {
+            panel.body.box = client;
+            panel.body.arrowX = (client.left + client.right) / 2;
+        }
     } else {
-        pose = GetPoseFromID(panel.body.bodyPose);
-    }
-    if (pose && pose->m_drawing && !pose->m_drawing->isNull()) {
-        const int iw = pose->m_drawing->width();
-        const int ih = pose->m_drawing->height();
-        if (ih > 0) {
-            bh = maxBodyH;
-            bw = std::max(200, iw * bh / ih);
-            if (bw > UNIT_PANEL_W * 4 / 5) {
-                bw = UNIT_PANEL_W * 4 / 5;
-                bh = iw > 0 ? ih * bw / iw : bh;
+        CPose *pose = GetPoseFromID(panel.body.bodyPose);
+        int bw = UNIT_PANEL_W / 3;
+        int bh = UNIT_PANEL_H * 10 / 19;
+        if (pose && pose->m_drawing && !pose->m_drawing->isNull()) {
+            const int iw = pose->m_drawing->width();
+            const int ih = pose->m_drawing->height();
+            if (ih > 0) {
+                bh = client.top - client.bottom;
+                bw = std::max(200, iw * bh / ih);
+                if (bw > client.right - client.left) {
+                    bw = client.right - client.left;
+                    bh = iw > 0 ? ih * bw / iw : bh;
+                }
             }
         }
+        const int margin = (UNIT_PANEL_W - bw) / 2;
+        panel.body.box.left = margin;
+        panel.body.box.right = margin + bw;
+        panel.body.box.bottom = client.bottom;
+        panel.body.box.top = client.bottom + bh;
+        panel.body.arrowX = (panel.body.box.left + panel.body.box.right) / 2;
     }
-
-    const int margin = (UNIT_PANEL_W - bw) / 2;
-    panel.body.box.left = margin;
-    panel.body.box.right = margin + bw;
-    panel.body.box.bottom = -UNIT_PANEL_H + 40;
-    panel.body.box.top = panel.body.box.bottom + bh;
-    panel.body.arrowX = (panel.body.box.left + panel.body.box.right) / 2;
 
     for (auto &bal : panel.balloons) {
         layoutBalloon(bal, panel.body);
@@ -179,13 +254,24 @@ void ComicScene::addLine(const std::string &text, UCHAR mode, const std::string 
     ScenePanel panel;
     panel.seed = static_cast<unsigned>(m_panels.size() + 1);
     panel.body.type = m_avatar.type;
+    panel.body.flags = m_avatar.flags;
     if (m_avatar.type == AT_COMPLEX) {
-        if (!m_avatar.facePoses.empty()) {
-            panel.body.facePose = m_avatar.facePoses.front();
+        if (!m_avatar.faces.empty()) {
+            const FaceRec &f = m_avatar.faces.front();
+            panel.body.facePose = f.poseID;
+            panel.body.face_xCX = f.xCX;
+            panel.body.face_yCX = f.yCX;
+            panel.body.face_dx = f.delta_xCX;
+            panel.body.face_dy = f.delta_yCX;
         }
-        if (!m_avatar.torsoPoses.empty()) {
-            panel.body.torsoPose = m_avatar.torsoPoses.front();
+        if (!m_avatar.torsos.empty()) {
+            const TorsoRec &t = m_avatar.torsos.front();
+            panel.body.torsoPose = t.poseID;
+            panel.body.torso_xCX = t.xCX;
+            panel.body.torso_yCX = t.yCX;
         }
+    } else if (!m_avatar.bodies.empty()) {
+        panel.body.bodyPose = m_avatar.bodies.front().poseID;
     } else if (!m_avatar.bodyPoses.empty()) {
         panel.body.bodyPose = m_avatar.bodyPoses.front();
     } else {
@@ -205,36 +291,33 @@ void ComicScene::addLine(const std::string &text, UCHAR mode, const std::string 
 
 void ComicScene::drawBody(ICanvas *canvas, const SceneBody &body) const
 {
-    const int dw = body.box.right - body.box.left;
-    const int dh = body.box.top - body.box.bottom;
-    if (dw <= 0 || dh <= 0) {
-        return;
-    }
+    auto drawPoseBox = [&](CPose *pose, const RECT &r) {
+        if (!pose || !pose->m_drawing) {
+            return;
+        }
+        const int w = r.right - r.left;
+        const int h = r.top - r.bottom;
+        if (w <= 0 || h <= 0) {
+            return;
+        }
+        // drawMasked expects dest rect with y = bottom of image in our flipped space
+        pose->drawMasked(canvas, r.left, r.bottom, w, h);
+    };
 
     if (body.type == AT_COMPLEX) {
         CPose *torso = GetPoseFromID(body.torsoPose);
         CPose *face = GetPoseFromID(body.facePose);
-        if (torso && torso->m_drawing) {
-            torso->drawMasked(canvas, body.box.left, body.box.bottom, dw, dh);
-        }
-        if (face && face->m_drawing && torso && torso->m_drawing) {
-            const int fw = face->m_drawing->width();
-            const int fh = face->m_drawing->height();
-            const int tw = std::max(1, torso->m_drawing->width());
-            const int th = std::max(1, torso->m_drawing->height());
-            const double sx = double(dw) / tw;
-            const double sy = double(dh) / th;
-            const int fdw = int(fw * sx);
-            const int fdh = int(fh * sy);
-            const int fx = body.box.left + (dw - fdw) / 2;
-            const int fy = body.box.top - fdh / 3;
-            face->drawMasked(canvas, fx, fy, fdw, fdh);
+        const bool torsoFirst = (body.flags & TORSOFIRST) != 0;
+        if (torsoFirst) {
+            drawPoseBox(torso, body.torsoBox);
+            drawPoseBox(face, body.headBox);
+        } else {
+            drawPoseBox(face, body.headBox);
+            drawPoseBox(torso, body.torsoBox);
         }
     } else {
         CPose *bodyPose = GetPoseFromID(body.bodyPose);
-        if (bodyPose) {
-            bodyPose->drawMasked(canvas, body.box.left, body.box.bottom, dw, dh);
-        }
+        drawPoseBox(bodyPose, body.box);
     }
 }
 

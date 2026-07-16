@@ -43,7 +43,13 @@ struct SceneBody {
     USHORT torsoPose = 0;
     USHORT bodyPose = 0;
     int type = AT_COMPLEX;
-    RECT box{}; // placed bbox in panel TWIPS
+    UCHAR flags = 0;
+    // Placement from .avb (complex only)
+    short face_xCX = 0, face_yCX = 0, face_dx = 0, face_dy = 0;
+    short torso_xCX = 0, torso_yCX = 0;
+    RECT box{}; // full body bbox in panel TWIPS
+    RECT headBox{};
+    RECT torsoBox{};
     int arrowX = 0;
 };
 

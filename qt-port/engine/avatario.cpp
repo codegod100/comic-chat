@@ -65,6 +65,11 @@ static bool loadBasics(int key, FILE *fp, LoadedAvatar &av, const std::string &p
     }
 }
 
+static short read16s(FILE *fp)
+{
+    return static_cast<short>(read16(fp));
+}
+
 static void loadFaceRecs(FILE *fp, int nFaces, LoadedAvatar &av, const std::string &pathBase)
 {
     int lastOffset = 0;
@@ -81,17 +86,20 @@ static void loadFaceRecs(FILE *fp, int nFaces, LoadedAvatar &av, const std::stri
         } else {
             pose = lastPose;
         }
-        av.facePoses.push_back(pose);
-        (void)read16(fp); // emotion
+        FaceRec rec;
+        rec.poseID = pose;
+        (void)read16(fp); // emotion index
         (void)read8(fp);  // intensity
-        (void)read16(fp);
-        (void)read16(fp);
-        (void)read16(fp);
-        (void)read16(fp);
-        (void)read16(fp);
-        (void)read16(fp);
+        rec.xCX = read16s(fp);
+        rec.yCX = read16s(fp);
+        rec.delta_xCX = read16s(fp);
+        rec.delta_yCX = read16s(fp);
+        rec.faceX = static_cast<UCHAR>(read16(fp));
+        rec.faceY = static_cast<UCHAR>(read16(fp));
         BYTE padding[16];
         fread(padding, 1, sizeof(padding), fp);
+        av.facePoses.push_back(pose);
+        av.faces.push_back(rec);
     }
 }
 
@@ -111,13 +119,16 @@ static void loadTorsoRecs(FILE *fp, int nTorsos, LoadedAvatar &av, const std::st
         } else {
             pose = lastPose;
         }
-        av.torsoPoses.push_back(pose);
+        TorsoRec rec;
+        rec.poseID = pose;
         (void)read16(fp);
         (void)read8(fp);
-        (void)read16(fp);
-        (void)read16(fp);
+        rec.xCX = read16s(fp);
+        rec.yCX = read16s(fp);
         BYTE padding[16];
         fread(padding, 1, sizeof(padding), fp);
+        av.torsoPoses.push_back(pose);
+        av.torsos.push_back(rec);
     }
 }
 
@@ -137,13 +148,16 @@ static void loadBodyRecs(FILE *fp, int nBodies, LoadedAvatar &av, const std::str
         } else {
             pose = lastPose;
         }
-        av.bodyPoses.push_back(pose);
+        BodyRec rec;
+        rec.poseID = pose;
         (void)read16(fp);
         (void)read8(fp);
-        (void)read16(fp);
-        (void)read16(fp);
+        rec.faceX = static_cast<UCHAR>(read16(fp));
+        rec.faceY = static_cast<UCHAR>(read16(fp));
         BYTE padding[16];
         fread(padding, 1, sizeof(padding), fp);
+        av.bodyPoses.push_back(pose);
+        av.bodies.push_back(rec);
     }
 }
 

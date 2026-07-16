@@ -86,19 +86,25 @@ void ComicImage::applyMask(const ComicImage &mask)
     if (m_img.isNull() || mask.isNull()) {
         return;
     }
+    // Comic Chat 1bpp masks: palette 0=white (transparent region), 1=black (keep).
+    // After QImage load, white areas are the background → punch those out.
     QImage m = mask.qimage().convertToFormat(QImage::Format_ARGB32);
     m_img = m_img.convertToFormat(QImage::Format_ARGB32);
-    const int w = std::min(m_img.width(), m.width());
-    const int h = std::min(m_img.height(), m.height());
+    if (m.size() != m_img.size()) {
+        m = m.scaled(m_img.size(), Qt::IgnoreAspectRatio, Qt::FastTransformation);
+    }
+    const int w = m_img.width();
+    const int h = m_img.height();
     for (int y = 0; y < h; ++y) {
         auto *dst = reinterpret_cast<QRgb *>(m_img.scanLine(y));
         const auto *src = reinterpret_cast<const QRgb *>(m.constScanLine(y));
         for (int x = 0; x < w; ++x) {
-            // Mask: near-black => transparent (historical mono mask).
             const int gray = qGray(src[x]);
-            if (gray < 16) {
+            if (gray > 128) {
+                // White / light in mask → transparent (outside character)
                 dst[x] = qRgba(0, 0, 0, 0);
             }
+            // Black / dark → keep drawing pixel (character)
         }
     }
 }
@@ -116,6 +122,24 @@ void ComicImage::makeColorKey(COLORREF key)
         auto *line = reinterpret_cast<QRgb *>(m_img.scanLine(y));
         for (int x = 0; x < m_img.width(); ++x) {
             if (qRed(line[x]) == kr && qGreen(line[x]) == kg && qBlue(line[x]) == kb) {
+                line[x] = qRgba(0, 0, 0, 0);
+            }
+        }
+    }
+}
+
+void ComicImage::makeWhiteTransparent(int threshold)
+{
+    if (m_img.isNull()) {
+        return;
+    }
+    m_img = m_img.convertToFormat(QImage::Format_ARGB32);
+    for (int y = 0; y < m_img.height(); ++y) {
+        auto *line = reinterpret_cast<QRgb *>(m_img.scanLine(y));
+        for (int x = 0; x < m_img.width(); ++x) {
+            // GDI SRCAND line art: white background shows through.
+            if (qRed(line[x]) >= threshold && qGreen(line[x]) >= threshold &&
+                qBlue(line[x]) >= threshold) {
                 line[x] = qRgba(0, 0, 0, 0);
             }
         }
