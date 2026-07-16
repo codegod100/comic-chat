@@ -1,8 +1,7 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT license.
 //
-// Phase 3: multi-line comic page. TWIPS layout (unit panel), drawn via ICanvas.
-// Not a full port of LayoutBalloon yet — enough for real AddLine → panels.
+// Comic strip scene: panels, balloons, multi-avatar nick mapping.
 
 #pragma once
 
@@ -13,10 +12,10 @@
 #include "platform/ICanvas.h"
 #include "platform/types.h"
 
+#include <map>
 #include <string>
 #include <vector>
 
-// Default unit panel size (historical MINUNITPANELWIDTH-ish / common 4860).
 #ifndef UNIT_PANEL_W
 #define UNIT_PANEL_W 4860
 #define UNIT_PANEL_H 4860
@@ -24,7 +23,7 @@
 
 struct WrappedLine {
     std::string text;
-    int width = 0; // logical units
+    int width = 0;
 };
 
 struct SceneBalloon {
@@ -32,10 +31,10 @@ struct SceneBalloon {
     std::string nick;
     UCHAR mode = SM_SAY;
     std::vector<WrappedLine> lines;
-    RECT textBox{};   // panel-local TWIPS (y-down-negative: top=0, bottom=-H)
-    RECT cloudBox{};  // inflated for spline
+    RECT textBox{};
+    RECT cloudBox{};
     int speakerArrowX = 0;
-    int speakerTop = 0; // y of head top (more positive than feet)
+    int speakerTop = 0;
 };
 
 struct SceneBody {
@@ -44,13 +43,13 @@ struct SceneBody {
     USHORT bodyPose = 0;
     int type = AT_COMPLEX;
     UCHAR flags = 0;
-    // Placement from .avb (complex only)
     short face_xCX = 0, face_yCX = 0, face_dx = 0, face_dy = 0;
     short torso_xCX = 0, torso_yCX = 0;
-    RECT box{}; // full body bbox in panel TWIPS
+    RECT box{};
     RECT headBox{};
     RECT torsoBox{};
     int arrowX = 0;
+    std::string avatarName; // art character name (anna, dan, …)
 };
 
 struct ScenePanel {
@@ -59,34 +58,36 @@ struct ScenePanel {
     unsigned seed = 1;
 };
 
-// One scrollable comic page driven by AddLine.
 class ComicScene {
 public:
     ComicScene();
 
+    // Backdrop + cast of characters available for nick assignment.
+    void setArt(std::vector<LoadedAvatar> avatars, const ComicImage &backdrop);
+    // Convenience: single avatar cast.
     void setArt(const LoadedAvatar &avatar, const ComicImage &backdrop);
+
     void clear();
 
-    // Add a spoken line. Creates a new panel. nick is shown in the balloon label.
+    // Add a spoken line. Nick is mapped to a stable character from the cast.
     void addLine(const std::string &text, UCHAR mode = SM_SAY,
                  const std::string &nick = "you");
 
     int panelCount() const { return static_cast<int>(m_panels.size()); }
+    int avatarCount() const { return static_cast<int>(m_avatars.size()); }
     int unitWidth() const { return UNIT_PANEL_W; }
     int unitHeight() const { return UNIT_PANEL_H; }
 
-    // Pixel size of one square panel given available viewport height.
     static int panelSideForHeight(int contentHeight);
-    // Total strip width for N panels at that height (including gaps).
     int contentWidthForHeight(int contentHeight) const;
-    // Height of the strip (one panel side + padding for status is caller's job).
     int contentHeightForHeight(int contentHeight) const;
 
-    // Draw panels left-to-right (comic strip). Each panel is square.
-    // Caller sizes dest wide enough and enables horizontal scroll.
     void draw(ICanvas *canvas, const RECT &dest) const;
 
     const std::string &status() const { return m_status; }
+
+    // Which art character is assigned to this nick (empty if none yet).
+    std::string avatarNameForNick(const std::string &nick) const;
 
 private:
     void layoutPanel(ScenePanel &panel);
@@ -97,13 +98,20 @@ private:
     void drawBody(ICanvas *canvas, const SceneBody &body) const;
     void drawBalloon(ICanvas *canvas, const SceneBalloon &b) const;
 
-    LoadedAvatar m_avatar;
+    // Lowercase nick → index into m_avatars (stable for session).
+    int assignAvatarIndex(const std::string &nick);
+    static std::string nickKey(const std::string &nick);
+    SceneBody bodyFromAvatar(const LoadedAvatar &av) const;
+    bool warmAvatarPoses(const LoadedAvatar &av) const;
+
+    std::vector<LoadedAvatar> m_avatars;
+    std::map<std::string, int> m_nickToAvatar;
+    int m_nextAssign = 0;
     ComicImage m_backdrop;
     std::vector<ScenePanel> m_panels;
     std::string m_status;
     bool m_hasArt = false;
 
-    // Font metrics in device px at layout time (point size used for QFont).
     int m_fontPoint = 12;
-    double m_layoutPxPerTwip = 0.05; // set during draw from dest size
+    double m_layoutPxPerTwip = 0.05;
 };

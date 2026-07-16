@@ -113,32 +113,39 @@ void ComicWidget::ensureAssetsLoaded()
         return;
     }
 
-    LoadedAvatar avatar;
-    if (!LoadDemoAvatar(avatar)) {
-        m_loadError = QStringLiteral("No avatar in %1")
+    std::vector<LoadedAvatar> cast = LoadAllAvatars();
+    if (cast.empty()) {
+        m_loadError = QStringLiteral("No avatars in %1")
                           .arg(QString::fromStdString(art.avatars));
         return;
     }
 
-    if (avatar.type == AT_COMPLEX) {
-        if (avatar.facePoses.empty() || avatar.torsoPoses.empty() ||
-            !GetPoseFromID(avatar.facePoses.front()) ||
-            !GetPoseFromID(avatar.torsoPoses.front())) {
-            m_loadError = QStringLiteral("Failed loading poses for %1")
-                              .arg(QString::fromStdString(avatar.name));
-            return;
-        }
-    } else {
-        const USHORT id =
-            !avatar.bodyPoses.empty() ? avatar.bodyPoses.front() : avatar.iconPose;
-        if (!GetPoseFromID(id)) {
-            m_loadError = QStringLiteral("Failed loading body for %1")
-                              .arg(QString::fromStdString(avatar.name));
-            return;
+    // Warm first pose for each cast member so assign-time draws don't hitch as hard.
+    int usable = 0;
+    for (const auto &av : cast) {
+        if (av.type == AT_COMPLEX) {
+            if (!av.faces.empty() && !av.torsos.empty() &&
+                GetPoseFromID(av.faces.front().poseID) &&
+                GetPoseFromID(av.torsos.front().poseID)) {
+                ++usable;
+            }
+        } else {
+            const USHORT id =
+                !av.bodies.empty()
+                    ? av.bodies.front().poseID
+                    : (!av.bodyPoses.empty() ? av.bodyPoses.front() : av.iconPose);
+            if (GetPoseFromID(id)) {
+                ++usable;
+            }
         }
     }
+    if (usable == 0) {
+        m_loadError = QStringLiteral("No drawable avatars in %1")
+                          .arg(QString::fromStdString(art.avatars));
+        return;
+    }
 
-    m_scene.setArt(avatar, backdrop);
+    m_scene.setArt(std::move(cast), backdrop);
     m_assetsOk = true;
     m_loadError.clear();
 }

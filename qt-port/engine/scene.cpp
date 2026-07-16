@@ -34,18 +34,129 @@ int logicalLineHeight(int fontPoint, double pxPerTwip)
 
 ComicScene::ComicScene() = default;
 
+void ComicScene::setArt(std::vector<LoadedAvatar> avatars, const ComicImage &backdrop)
+{
+    m_avatars = std::move(avatars);
+    m_backdrop = backdrop;
+    m_hasArt = !backdrop.isNull() && !m_avatars.empty();
+    m_nickToAvatar.clear();
+    m_nextAssign = 0;
+    m_status = m_hasArt ? ("Cast: " + std::to_string(m_avatars.size()) + " characters")
+                        : "No art";
+}
+
 void ComicScene::setArt(const LoadedAvatar &avatar, const ComicImage &backdrop)
 {
-    m_avatar = avatar;
-    m_backdrop = backdrop;
-    m_hasArt = !backdrop.isNull();
-    m_status = "Avatar: " + avatar.name;
+    std::vector<LoadedAvatar> one;
+    one.push_back(avatar);
+    setArt(std::move(one), backdrop);
 }
 
 void ComicScene::clear()
 {
     m_panels.clear();
-    m_status = "Cleared";
+    // Keep nick→avatar mapping so users keep the same character after clear.
+    m_status = m_hasArt ? ("Cast: " + std::to_string(m_avatars.size()) + " characters")
+                        : "Cleared";
+}
+
+std::string ComicScene::nickKey(const std::string &nick)
+{
+    std::string k = nick.empty() ? "you" : nick;
+    for (char &c : k) {
+        if (c >= 'A' && c <= 'Z') {
+            c = static_cast<char>(c - 'A' + 'a');
+        }
+    }
+    return k;
+}
+
+bool ComicScene::warmAvatarPoses(const LoadedAvatar &av) const
+{
+    if (av.type == AT_COMPLEX) {
+        if (av.faces.empty() || av.torsos.empty()) {
+            return false;
+        }
+        return GetPoseFromID(av.faces.front().poseID) != nullptr &&
+               GetPoseFromID(av.torsos.front().poseID) != nullptr;
+    }
+    USHORT id = 0;
+    if (!av.bodies.empty()) {
+        id = av.bodies.front().poseID;
+    } else if (!av.bodyPoses.empty()) {
+        id = av.bodyPoses.front();
+    } else {
+        id = av.iconPose;
+    }
+    return GetPoseFromID(id) != nullptr;
+}
+
+int ComicScene::assignAvatarIndex(const std::string &nick)
+{
+    if (m_avatars.empty()) {
+        return -1;
+    }
+    const std::string key = nickKey(nick);
+    auto it = m_nickToAvatar.find(key);
+    if (it != m_nickToAvatar.end()) {
+        return it->second;
+    }
+
+    // First-seen order: give each new nick the next cast member (wrap around).
+    const int n = static_cast<int>(m_avatars.size());
+    for (int tries = 0; tries < n; ++tries) {
+        const int idx = (m_nextAssign + tries) % n;
+        if (warmAvatarPoses(m_avatars[static_cast<size_t>(idx)])) {
+            m_nextAssign = (idx + 1) % n;
+            m_nickToAvatar[key] = idx;
+            return idx;
+        }
+    }
+    // Fallback: first entry even if warm fails
+    m_nickToAvatar[key] = 0;
+    m_nextAssign = n > 1 ? 1 : 0;
+    return 0;
+}
+
+SceneBody ComicScene::bodyFromAvatar(const LoadedAvatar &av) const
+{
+    SceneBody body;
+    body.type = av.type;
+    body.flags = av.flags;
+    body.avatarName = av.name;
+    if (av.type == AT_COMPLEX) {
+        if (!av.faces.empty()) {
+            const FaceRec &f = av.faces.front();
+            body.facePose = f.poseID;
+            body.face_xCX = f.xCX;
+            body.face_yCX = f.yCX;
+            body.face_dx = f.delta_xCX;
+            body.face_dy = f.delta_yCX;
+        }
+        if (!av.torsos.empty()) {
+            const TorsoRec &t = av.torsos.front();
+            body.torsoPose = t.poseID;
+            body.torso_xCX = t.xCX;
+            body.torso_yCX = t.yCX;
+        }
+    } else if (!av.bodies.empty()) {
+        body.bodyPose = av.bodies.front().poseID;
+    } else if (!av.bodyPoses.empty()) {
+        body.bodyPose = av.bodyPoses.front();
+    } else {
+        body.bodyPose = av.iconPose;
+    }
+    return body;
+}
+
+std::string ComicScene::avatarNameForNick(const std::string &nick) const
+{
+    auto it = m_nickToAvatar.find(nickKey(nick));
+    if (it == m_nickToAvatar.end() || it->second < 0 ||
+        it->second >= static_cast<int>(m_avatars.size())) {
+        return {};
+    }
+    return m_avatars[static_cast<size_t>(it->second)].name;
 }
 
 int ComicScene::measureLogical(const std::string &s) const
@@ -285,49 +396,35 @@ void ComicScene::layoutPanel(ScenePanel &panel)
 
 void ComicScene::addLine(const std::string &text, UCHAR mode, const std::string &nick)
 {
-    if (text.empty()) {
+    if (text.empty() || m_avatars.empty()) {
         return;
     }
     if (m_layoutPxPerTwip <= 0.0) {
         m_layoutPxPerTwip = 720.0 / UNIT_PANEL_W;
     }
 
+    const std::string who = nick.empty() ? "you" : nick;
+    const int avIdx = assignAvatarIndex(who);
+    if (avIdx < 0) {
+        return;
+    }
+    const LoadedAvatar &av = m_avatars[static_cast<size_t>(avIdx)];
+
     ScenePanel panel;
     panel.seed = static_cast<unsigned>(m_panels.size() + 1);
-    panel.body.type = m_avatar.type;
-    panel.body.flags = m_avatar.flags;
-    if (m_avatar.type == AT_COMPLEX) {
-        if (!m_avatar.faces.empty()) {
-            const FaceRec &f = m_avatar.faces.front();
-            panel.body.facePose = f.poseID;
-            panel.body.face_xCX = f.xCX;
-            panel.body.face_yCX = f.yCX;
-            panel.body.face_dx = f.delta_xCX;
-            panel.body.face_dy = f.delta_yCX;
-        }
-        if (!m_avatar.torsos.empty()) {
-            const TorsoRec &t = m_avatar.torsos.front();
-            panel.body.torsoPose = t.poseID;
-            panel.body.torso_xCX = t.xCX;
-            panel.body.torso_yCX = t.yCX;
-        }
-    } else if (!m_avatar.bodies.empty()) {
-        panel.body.bodyPose = m_avatar.bodies.front().poseID;
-    } else if (!m_avatar.bodyPoses.empty()) {
-        panel.body.bodyPose = m_avatar.bodyPoses.front();
-    } else {
-        panel.body.bodyPose = m_avatar.iconPose;
-    }
+    panel.body = bodyFromAvatar(av);
 
     SceneBalloon bal;
     bal.text = text;
-    bal.nick = nick.empty() ? "you" : nick;
+    bal.nick = who;
     bal.mode = mode;
     panel.balloons.push_back(std::move(bal));
 
     layoutPanel(panel);
     m_panels.push_back(std::move(panel));
-    m_status = "Panels: " + std::to_string(m_panels.size()) + " | " + m_avatar.name;
+    m_status = "Panels: " + std::to_string(m_panels.size()) + " | " + who + " → " +
+               av.name + " (" + std::to_string(m_nickToAvatar.size()) + " speakers, " +
+               std::to_string(m_avatars.size()) + " cast)";
 }
 
 void ComicScene::drawBody(ICanvas *canvas, const SceneBody &body) const

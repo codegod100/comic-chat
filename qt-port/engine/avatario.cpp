@@ -6,6 +6,7 @@
 #include "engine/pose.h"
 
 #include <QDir>
+#include <algorithm>
 #include <cstdio>
 #include <cstring>
 
@@ -224,22 +225,52 @@ bool LoadAvatarInfo(const std::string &baseName, LoadedAvatar &out)
 
 bool LoadDemoAvatar(LoadedAvatar &out)
 {
-    // Prefer a complex character with rich art; fall back to simple.
-    static const char *prefer[] = {"anna", "dan", "denise", "connor", "glenda", "bolo", nullptr};
+    auto all = LoadAllAvatars();
+    if (all.empty()) {
+        return false;
+    }
+    out = std::move(all.front());
+    return true;
+}
+
+std::vector<LoadedAvatar> LoadAllAvatars()
+{
+    std::vector<LoadedAvatar> result;
+
+    // Prefer a stable, human-friendly order for the first assignments.
+    static const char *prefer[] = {
+        "anna",    "dan",    "denise", "connor", "glenda", "bolo",  "cro",
+        "armando", "hugh",   "jordan", "lance",  "lynnea", "margaret", "mike",
+        "susan",   "tiki",   "tux",    "waf",    "xeno",   "rainbow",  "pedagog",
+        "tongtyed", nullptr};
+
+    std::vector<std::string> names;
     for (int i = 0; prefer[i]; ++i) {
-        if (LoadAvatarInfo(prefer[i], out)) {
-            return true;
-        }
+        names.emplace_back(prefer[i]);
     }
 
     QDir dir(QString::fromStdString(avatarArtDir()));
     const QStringList avbs = dir.entryList(QStringList() << "*.avb", QDir::Files, QDir::Name);
     for (const QString &f : avbs) {
         QString base = f;
-        base.chop(4);
-        if (LoadAvatarInfo(base.toStdString(), out)) {
-            return true;
+        if (base.endsWith(QLatin1String(".avb"), Qt::CaseInsensitive)) {
+            base.chop(4);
+        }
+        const std::string s = base.toStdString();
+        if (std::find(names.begin(), names.end(), s) == names.end()) {
+            names.push_back(s);
         }
     }
-    return false;
+
+    for (const auto &name : names) {
+        LoadedAvatar av;
+        if (LoadAvatarInfo(name, av)) {
+            // Skip empties that parse but have no drawable poses
+            if (!av.faces.empty() || !av.torsos.empty() || !av.bodies.empty() ||
+                !av.bodyPoses.empty()) {
+                result.push_back(std::move(av));
+            }
+        }
+    }
+    return result;
 }

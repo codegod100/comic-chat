@@ -65,3 +65,5 @@ struct LoadedAvatar {
 
 bool LoadAvatarInfo(const std::string &baseName, LoadedAvatar &out);
 bool LoadDemoAvatar(LoadedAvatar &out);
+// Load every .avb under the avatar art directory (skips failures).
+std::vector<LoadedAvatar> LoadAllAvatars();
