@@ -86,8 +86,10 @@ void ComicImage::applyMask(const ComicImage &mask)
     if (m_img.isNull() || mask.isNull()) {
         return;
     }
-    // Comic Chat 1bpp masks: palette 0=white (outside), 1=black (character).
-    // Keep only ink inside the mask; force solid black so fills are opaque.
+    // Comic Chat 1bpp: mask white = outside (transparent), mask black = inside.
+    // Inside the mask: drawing black = ink, drawing white = solid white fill
+    // (skin / interior). Making interior white transparent was punching holes
+    // so the backdrop showed through the face.
     QImage m = mask.qimage().convertToFormat(QImage::Format_ARGB32);
     m_img = m_img.convertToFormat(QImage::Format_ARGB32);
     if (m.size() != m_img.size()) {
@@ -97,14 +99,14 @@ void ComicImage::applyMask(const ComicImage &mask)
     const int h = m_img.height();
     for (int y = 0; y < h; ++y) {
         auto *dst = reinterpret_cast<QRgb *>(m_img.scanLine(y));
-        const auto *src = reinterpret_cast<const QRgb *>(m.constScanLine(y));
+        const auto *ms = reinterpret_cast<const QRgb *>(m.constScanLine(y));
         for (int x = 0; x < w; ++x) {
-            const int maskGray = qGray(src[x]);
-            const int inkGray = qGray(dst[x]);
-            if (maskGray > 128 || inkGray >= 250) {
-                dst[x] = qRgba(0, 0, 0, 0);
+            if (qGray(ms[x]) > 128) {
+                dst[x] = qRgba(0, 0, 0, 0); // outside silhouette
+            } else if (qGray(dst[x]) >= 250) {
+                dst[x] = qRgba(255, 255, 255, 255); // interior fill (skin)
             } else {
-                dst[x] = qRgba(0, 0, 0, 255);
+                dst[x] = qRgba(0, 0, 0, 255); // ink
             }
         }
     }
@@ -134,10 +136,8 @@ void ComicImage::makeWhiteTransparent(int threshold)
     if (m_img.isNull()) {
         return;
     }
-    // Comic Chat avatars are 1bpp black ink on white. GDI draws them with
-    // SRCAND so white is clear and black is solid ink. Mirror that: pure
-    // white → transparent; everything else → fully opaque black (no
-    // see-through gray fills).
+    // Unmasked poses (many torsos): GDI SRCAND — white clear, black solid ink.
+    // No white body fill is stored in those bitmaps (outline + solid black only).
     m_img = m_img.convertToFormat(QImage::Format_ARGB32);
     for (int y = 0; y < m_img.height(); ++y) {
         auto *line = reinterpret_cast<QRgb *>(m_img.scanLine(y));
