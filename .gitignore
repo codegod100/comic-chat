@@ -441,3 +441,7 @@ FodyWeavers.xsd
 *.msm
 *.msp
 .gstack/
+
+# Qt port CMake build trees
+qt-port/build/
+qt-port/build-*/

@@ -124,6 +124,11 @@ Fork owners can enable Actions and run the workflow without any secrets. See
 [`docs/UNOFFICIAL-RELEASE.md`](docs/UNOFFICIAL-RELEASE.md) for the packaging and
 manual release process.
 
+### Qt port (Linux / cross-platform, experimental)
+
+[`qt-port/`](qt-port/) is an early **Qt6** re-host of the comic client (no MFC).
+It does not yet load avatars or speak IRC; see [`qt-port/README.md`](qt-port/README.md).
+
 ### A note on the modernized folders
 
 This repository is published primarily as a **historical artifact** — the source is here for reference, study, and preservation, not as a maintained product. The `*-modern` folders are **not** a polished re-release; they're **worked examples** of the kinds of changes it takes to get a 1996–1998 MFC application building and running on a current machine, such as:
