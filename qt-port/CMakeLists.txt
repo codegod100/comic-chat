@@ -9,6 +9,10 @@ set(CMAKE_AUTOUIC ON)
 
 find_package(Qt6 REQUIRED COMPONENTS Widgets)
 
+# Default art path: sibling modern tree (override with -DCOMIC_ART_DIR=...)
+set(COMIC_ART_DIR "${CMAKE_SOURCE_DIR}/../v1.0-pre-modern/comicart"
+    CACHE PATH "Path to ComicArt (avatars + backdrop)")
+
 add_library(comic_platform STATIC
     platform/QtCanvas.cpp
 )
@@ -24,11 +28,19 @@ add_library(comic_engine STATIC
     engine/traj.cpp
     engine/arc.cpp
     engine/spline.cpp
+    engine/image.cpp
+    engine/art_paths.cpp
+    engine/pose.cpp
+    engine/avatario.cpp
+    engine/backdrop_qt.cpp
 )
 target_include_directories(comic_engine PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}
 )
 target_link_libraries(comic_engine PUBLIC comic_platform)
+target_compile_definitions(comic_engine PRIVATE
+    COMIC_ART_DIR="${COMIC_ART_DIR}"
+)
 
 add_executable(comic-chat-qt
     app/main.cpp
@@ -36,10 +48,6 @@ add_executable(comic-chat-qt
     app/ComicWidget.cpp
 )
 target_link_libraries(comic-chat-qt PRIVATE comic_engine comic_platform Qt6::Widgets)
-
-# Default art path: sibling modern tree (override with -DCOMIC_ART_DIR=...)
-set(COMIC_ART_DIR "${CMAKE_SOURCE_DIR}/../v1.0-pre-modern/comicart"
-    CACHE PATH "Path to ComicArt (avatars + backdrop)")
 target_compile_definitions(comic-chat-qt PRIVATE
     COMIC_ART_DIR="${COMIC_ART_DIR}"
 )

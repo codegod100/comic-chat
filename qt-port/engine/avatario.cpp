@@ -1,0 +1,231 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT license.
+
+#include "engine/avatario.h"
+#include "engine/art_paths.h"
+#include "engine/pose.h"
+
+#include <QDir>
+#include <cstdio>
+#include <cstring>
+
+using INT16 = int16_t;
+using INT32 = int32_t;
+
+static INT16 read16(FILE *fp)
+{
+    INT16 val = 0;
+    fread(&val, sizeof(val), 1, fp);
+    return val;
+}
+
+static INT32 read32(FILE *fp)
+{
+    INT32 val = 0;
+    fread(&val, sizeof(val), 1, fp);
+    return val;
+}
+
+static UCHAR read8(FILE *fp)
+{
+    UCHAR val = 0;
+    fread(&val, sizeof(val), 1, fp);
+    return val;
+}
+
+static bool loadBasics(int key, FILE *fp, LoadedAvatar &av, const std::string &pathBase)
+{
+    switch (key) {
+    case AK_NAME: {
+        char buff[128];
+        int c;
+        char *bptr = buff;
+        while ((c = fgetc(fp)) != EOF) {
+            *bptr++ = static_cast<char>(c);
+            if (!c || bptr >= buff + sizeof(buff) - 1)
+                break;
+        }
+        *bptr = 0;
+        av.name = buff;
+        return true;
+    }
+    case AK_STYLE:
+        (void)read16(fp);
+        return true;
+    case AK_FLAGS:
+        av.flags = static_cast<UCHAR>(read16(fp));
+        return true;
+    case AK_ICON: {
+        int fgnd = read32(fp);
+        av.iconPose = RegisterAVFileRec(fgnd, 0, 0, pathBase);
+        return true;
+    }
+    default:
+        return false;
+    }
+}
+
+static void loadFaceRecs(FILE *fp, int nFaces, LoadedAvatar &av, const std::string &pathBase)
+{
+    int lastOffset = 0;
+    USHORT lastPose = 0;
+    for (int i = 0; i < nFaces; i++) {
+        int fgndOffset = read32(fp);
+        int transOffset = read32(fp);
+        int auraOffset = read32(fp);
+        USHORT pose;
+        if (fgndOffset != lastOffset) {
+            pose = RegisterAVFileRec(fgndOffset, transOffset, auraOffset, pathBase);
+            lastOffset = fgndOffset;
+            lastPose = pose;
+        } else {
+            pose = lastPose;
+        }
+        av.facePoses.push_back(pose);
+        (void)read16(fp); // emotion
+        (void)read8(fp);  // intensity
+        (void)read16(fp);
+        (void)read16(fp);
+        (void)read16(fp);
+        (void)read16(fp);
+        (void)read16(fp);
+        (void)read16(fp);
+        BYTE padding[16];
+        fread(padding, 1, sizeof(padding), fp);
+    }
+}
+
+static void loadTorsoRecs(FILE *fp, int nTorsos, LoadedAvatar &av, const std::string &pathBase)
+{
+    int lastOffset = 0;
+    USHORT lastPose = 0;
+    for (int i = 0; i < nTorsos; i++) {
+        int fgndOffset = read32(fp);
+        int transOffset = read32(fp);
+        int auraOffset = read32(fp);
+        USHORT pose;
+        if (fgndOffset != lastOffset) {
+            pose = RegisterAVFileRec(fgndOffset, transOffset, auraOffset, pathBase);
+            lastOffset = fgndOffset;
+            lastPose = pose;
+        } else {
+            pose = lastPose;
+        }
+        av.torsoPoses.push_back(pose);
+        (void)read16(fp);
+        (void)read8(fp);
+        (void)read16(fp);
+        (void)read16(fp);
+        BYTE padding[16];
+        fread(padding, 1, sizeof(padding), fp);
+    }
+}
+
+static void loadBodyRecs(FILE *fp, int nBodies, LoadedAvatar &av, const std::string &pathBase)
+{
+    int lastOffset = 0;
+    USHORT lastPose = 0;
+    for (int i = 0; i < nBodies; i++) {
+        int fgndOffset = read32(fp);
+        int transOffset = read32(fp);
+        int auraOffset = read32(fp);
+        USHORT pose;
+        if (fgndOffset != lastOffset) {
+            pose = RegisterAVFileRec(fgndOffset, transOffset, auraOffset, pathBase);
+            lastOffset = fgndOffset;
+            lastPose = pose;
+        } else {
+            pose = lastPose;
+        }
+        av.bodyPoses.push_back(pose);
+        (void)read16(fp);
+        (void)read8(fp);
+        (void)read16(fp);
+        (void)read16(fp);
+        BYTE padding[16];
+        fread(padding, 1, sizeof(padding), fp);
+    }
+}
+
+bool LoadAvatarInfo(const std::string &baseName, LoadedAvatar &out)
+{
+    out = LoadedAvatar{};
+    out.name = baseName;
+    const std::string path = joinPath(avatarArtDir(), baseName + ".avb");
+    FILE *fp = fopen(path.c_str(), "rb");
+    if (!fp) {
+        return false;
+    }
+
+    int magicNum = read16(fp);
+    int avType = read16(fp);
+    int version = read16(fp);
+    (void)version;
+    if (magicNum != AF_MAGICNUM) {
+        fclose(fp);
+        return false;
+    }
+    out.type = avType;
+
+    bool ok = true;
+    while (ok) {
+        int key = read16(fp);
+        if (feof(fp)) {
+            break;
+        }
+        if (loadBasics(key, fp, out, baseName)) {
+            continue;
+        }
+        switch (key) {
+        case AK_NFACES: {
+            int n = read16(fp);
+            loadFaceRecs(fp, n, out, baseName);
+            break;
+        }
+        case AK_NTORSOS: {
+            int n = read16(fp);
+            loadTorsoRecs(fp, n, out, baseName);
+            break;
+        }
+        case AK_NBODIES: {
+            int n = read16(fp);
+            loadBodyRecs(fp, n, out, baseName);
+            break;
+        }
+        case AK_STARTDATA:
+            fclose(fp);
+            if (out.name.empty()) {
+                out.name = baseName;
+            }
+            return true;
+        default:
+            // Unknown key — stop to avoid desync
+            ok = false;
+            break;
+        }
+    }
+    fclose(fp);
+    return !out.facePoses.empty() || !out.bodyPoses.empty() || !out.torsoPoses.empty();
+}
+
+bool LoadDemoAvatar(LoadedAvatar &out)
+{
+    // Prefer a complex character with rich art; fall back to simple.
+    static const char *prefer[] = {"anna", "dan", "denise", "connor", "glenda", "bolo", nullptr};
+    for (int i = 0; prefer[i]; ++i) {
+        if (LoadAvatarInfo(prefer[i], out)) {
+            return true;
+        }
+    }
+
+    QDir dir(QString::fromStdString(avatarArtDir()));
+    const QStringList avbs = dir.entryList(QStringList() << "*.avb", QDir::Files, QDir::Name);
+    for (const QString &f : avbs) {
+        QString base = f;
+        base.chop(4);
+        if (LoadAvatarInfo(base.toStdString(), out)) {
+            return true;
+        }
+    }
+    return false;
+}
