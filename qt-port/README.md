@@ -9,7 +9,7 @@ does **not** use MFC or the Visual Studio toolchain.
 | Phase | Goal | Status |
 |-------|------|--------|
 | 0 | Scaffold, `ICanvas`, demo window | **done** |
-| 1 | Math + spline/image draw | **in progress** (vector2d, bbox, pe) |
+| 1 | Math + spline draw | **done** (vector2d, bbox, pe, traj, arc, spline) |
 | 2 | `.avb` + backdrop load | planned |
 | 3 | Panel layout from a fake chat line | planned |
 | 4 | Main window shell (local say box) | planned |

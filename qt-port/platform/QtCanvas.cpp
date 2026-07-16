@@ -104,6 +104,19 @@ void QtCanvas::setFont(const std::string &family, int pointSize, bool bold)
     m_painter->setFont(f);
 }
 
+void QtCanvas::beginPath()
+{
+    m_path = QPainterPath();
+    m_pathActive = true;
+}
+
+void QtCanvas::closePath()
+{
+    if (m_pathActive) {
+        m_path.closeSubpath();
+    }
+}
+
 void QtCanvas::moveTo(int x, int y)
 {
     m_current = mapPoint(x, y);
@@ -123,6 +136,28 @@ void QtCanvas::lineTo(int x, int y)
     }
     m_current = mapPoint(x, y);
     m_path.lineTo(m_current);
+}
+
+void QtCanvas::cubicTo(int c1x, int c1y, int c2x, int c2y, int ex, int ey)
+{
+    if (!m_pathActive) {
+        m_path = QPainterPath();
+        m_path.moveTo(m_current);
+        m_pathActive = true;
+    }
+    const QPointF c1 = mapPoint(c1x, c1y);
+    const QPointF c2 = mapPoint(c2x, c2y);
+    m_current = mapPoint(ex, ey);
+    m_path.cubicTo(c1, c2, m_current);
+}
+
+void QtCanvas::polyBezierTo(const POINT *pts, int count)
+{
+    // GDI PolyBezierTo: groups of 3 points (cp1, cp2, end).
+    for (int i = 0; i + 2 < count; i += 3) {
+        cubicTo(pts[i].x, pts[i].y, pts[i + 1].x, pts[i + 1].y, pts[i + 2].x,
+                pts[i + 2].y);
+    }
 }
 
 void QtCanvas::stroke()

@@ -21,6 +21,9 @@ add_library(comic_engine STATIC
     engine/vector2d.cpp
     engine/bbox.cpp
     engine/pe.cpp
+    engine/traj.cpp
+    engine/arc.cpp
+    engine/spline.cpp
 )
 target_include_directories(comic_engine PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}

@@ -61,8 +61,14 @@ public:
     virtual void setFont(const std::string &family, int pointSize, bool bold = false) = 0;
 
     // --- path / primitives (logical coordinates) ---
+    virtual void beginPath() = 0;
+    virtual void closePath() = 0;
     virtual void moveTo(int x, int y) = 0;
     virtual void lineTo(int x, int y) = 0;
+    // Cubic Bézier: control1, control2, end (GDI PolyBezierTo segment).
+    virtual void cubicTo(int c1x, int c1y, int c2x, int c2y, int ex, int ey) = 0;
+    // GDI-style: pts[0..count) is sequence of (c1,c2,end)* for PolyBezierTo.
+    virtual void polyBezierTo(const POINT *pts, int count) = 0;
     virtual void stroke() = 0;   // stroke current path and clear it
     virtual void fill() = 0;     // fill current path and clear it
     virtual void strokeAndFill() = 0;

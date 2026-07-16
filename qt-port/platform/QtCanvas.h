@@ -51,8 +51,12 @@ public:
     void setNoBrush() override;
     void setFont(const std::string &family, int pointSize, bool bold = false) override;
 
+    void beginPath() override;
+    void closePath() override;
     void moveTo(int x, int y) override;
     void lineTo(int x, int y) override;
+    void cubicTo(int c1x, int c1y, int c2x, int c2y, int ex, int ey) override;
+    void polyBezierTo(const POINT *pts, int count) override;
     void stroke() override;
     void fill() override;
     void strokeAndFill() override;
