@@ -50,4 +50,5 @@ private:
     QPushButton *m_disconnectBtn = nullptr;
 
     IrcClient *m_irc = nullptr;
+    bool m_syncingComic = false;
 };

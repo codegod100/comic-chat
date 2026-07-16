@@ -131,18 +131,25 @@ bool MainWindow::eventFilter(QObject *watched, QEvent *event)
 
 void MainWindow::syncComicSize()
 {
-    if (!m_comic || !m_comicScroll) {
+    if (!m_comic || !m_comicScroll || m_syncingComic) {
         return;
     }
+    m_syncingComic = true;
+
     // Panel size from viewport height; strip width grows with panel count.
     const int vh = std::max(220, m_comicScroll->viewport()->height());
     m_comic->setViewportHeight(vh);
     const QSize hint = m_comic->sizeHint();
-    m_comic->resize(std::max(hint.width(), m_comicScroll->viewport()->width()),
-                    hint.height());
+    const int w = std::max(hint.width(), m_comicScroll->viewport()->width());
+    const int h = hint.height();
+    if (m_comic->width() != w || m_comic->height() != h) {
+        m_comic->resize(w, h);
+    }
     // Keep the newest panel in view (scroll to the right).
     m_comicScroll->horizontalScrollBar()->setValue(
         m_comicScroll->horizontalScrollBar()->maximum());
+
+    m_syncingComic = false;
 }
 
 void MainWindow::appendLog(const QString &line)

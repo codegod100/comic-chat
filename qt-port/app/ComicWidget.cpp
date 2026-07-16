@@ -23,8 +23,14 @@ ComicWidget::ComicWidget(QWidget *parent)
 
 void ComicWidget::setViewportHeight(int h)
 {
-    m_viewportH = std::max(200, h);
-    relayout();
+    h = std::max(200, h);
+    if (h == m_viewportH) {
+        return;
+    }
+    m_viewportH = h;
+    // Size is applied by MainWindow::syncComicSize — do not emit contentResized
+    // here or we recurse (sync → setViewportHeight → contentResized → sync).
+    updateGeometry();
 }
 
 int ComicWidget::contentHeight() const
