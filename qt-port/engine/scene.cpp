@@ -162,24 +162,27 @@ SceneBody ComicScene::bodyFromRpgSprite(const ComicImage &sprite, const std::str
 }
 
 void ComicScene::setRpgSpriteForNick(const std::string &nick, const ComicImage &sprite,
-                                     const std::string &label)
+                                     const std::string &label, bool isSheet, int columns,
+                                     int rows)
 {
     const std::string key = nickKey(nick);
     if (sprite.isNull()) {
         m_nickRpgSprites.erase(key);
-        m_nickRpgLabels.erase(key);
         return;
     }
-    m_nickRpgSprites[key] = sprite;
-    if (!label.empty()) {
-        m_nickRpgLabels[key] = label;
-    }
+    RpgSpriteOverride ov;
+    ov.image = sprite;
+    ov.label = label;
+    ov.isSheet = isSheet;
+    ov.columns = std::max(1, columns);
+    ov.rows = std::max(1, rows);
+    m_nickRpgSprites[key] = std::move(ov);
 }
 
 bool ComicScene::hasRpgSpriteForNick(const std::string &nick) const
 {
     auto it = m_nickRpgSprites.find(nickKey(nick));
-    return it != m_nickRpgSprites.end() && !it->second.isNull();
+    return it != m_nickRpgSprites.end() && !it->second.image.isNull();
 }
 
 SceneBody ComicScene::bodyForNick(const std::string &nick)
@@ -188,13 +191,18 @@ SceneBody ComicScene::bodyForNick(const std::string &nick)
     const std::string key = nickKey(who);
 
     auto rpg = m_nickRpgSprites.find(key);
-    if (rpg != m_nickRpgSprites.end() && !rpg->second.isNull()) {
-        std::string label = who;
-        auto lab = m_nickRpgLabels.find(key);
-        if (lab != m_nickRpgLabels.end() && !lab->second.empty()) {
-            label = lab->second;
-        }
-        return bodyFromRpgSprite(rpg->second, who, label);
+    if (rpg != m_nickRpgSprites.end() && !rpg->second.image.isNull()) {
+        const auto &ov = rpg->second;
+        SceneBody body;
+        body.type = AT_CUSTOM;
+        body.nick = who;
+        body.avatarName = ov.label.empty() ? who : ov.label;
+        body.customSprite = ov.image;
+        body.rpgIsSheet = ov.isSheet;
+        body.rpgColumns = ov.columns;
+        body.rpgRows = ov.rows;
+        body.rpgFacing = RpgFacing::Down;
+        return body;
     }
 
     if (m_avatars.empty()) {
@@ -316,19 +324,28 @@ void ComicScene::layoutBalloon(SceneBalloon &b, const SceneBody &body, int ballo
     if (b.hasImage()) {
         const int iw = std::max(1, b.image.width());
         const int ih = std::max(1, b.image.height());
-        // Fit into upper ~40% of panel, near speaker.
-        const int maxImgW = UNIT_PANEL_W * (balloonCount > 1 ? 38 : 55) / 100;
-        const int maxImgH = UNIT_PANEL_H * 34 / 100;
-        double scale = std::min(double(maxImgW) / iw, double(maxImgH) / ih);
-        scale = std::min(scale, 1.0);
-        int imgW = std::max(200, int(std::lround(iw * scale)));
-        int imgH = std::max(200, int(std::lround(ih * scale)));
+        // Large photo frame in the upper half so chat images are easy to read.
+        // Allow upscaling small sources (thumbnails / pixel art) to fill the frame.
+        const int maxImgW = UNIT_PANEL_W * (balloonCount > 2 ? 52 : (balloonCount > 1 ? 62 : 78)) / 100;
+        const int maxImgH = UNIT_PANEL_H * (balloonCount > 1 ? 42 : 52) / 100;
+        const double scale = std::min(double(maxImgW) / iw, double(maxImgH) / ih);
+        int imgW = std::max(400, int(std::lround(iw * scale)));
+        int imgH = std::max(400, int(std::lround(ih * scale)));
+        // Never exceed the max box even if min floor pushed us over.
+        if (imgW > maxImgW) {
+            imgH = std::max(1, imgH * maxImgW / imgW);
+            imgW = maxImgW;
+        }
+        if (imgH > maxImgH) {
+            imgW = std::max(1, imgW * maxImgH / imgH);
+            imgH = maxImgH;
+        }
 
         const int captionLines =
             (b.text.empty() ? 0 : std::max(1, (int)wrapText(b.text, maxImgW - 2 * padX).size())) +
             (b.nick.empty() ? 0 : 1);
         const int captionH = captionLines > 0 ? captionLines * lineH + padY : 0;
-        const int framePad = 120;
+        const int framePad = 80;
         const int totalH = imgH + 2 * framePad + captionH;
         const int totalW = imgW + 2 * framePad;
 
@@ -517,12 +534,18 @@ void ComicScene::layoutOneBody(SceneBody &body, const RECT &client) const
         return;
     }
 
-    // AT_SIMPLE or AT_CUSTOM (rpg.actor sprite frame, etc.)
+    // AT_SIMPLE or AT_CUSTOM (rpg.actor sprite frame / walk sheet cell)
     int iw = 0;
     int ih = 0;
     if (body.type == AT_CUSTOM && !body.customSprite.isNull()) {
-        iw = body.customSprite.width();
-        ih = body.customSprite.height();
+        if (body.rpgIsSheet && body.rpgColumns > 0 && body.rpgRows > 0) {
+            // Layout uses one cell of the walk sheet, not the full grid.
+            iw = std::max(1, body.customSprite.width() / body.rpgColumns);
+            ih = std::max(1, body.customSprite.height() / body.rpgRows);
+        } else {
+            iw = body.customSprite.width();
+            ih = body.customSprite.height();
+        }
     } else {
         CPose *pose = GetPoseFromID(body.bodyPose);
         if (pose && pose->m_drawing && !pose->m_drawing->isNull()) {
@@ -595,13 +618,15 @@ void ComicScene::assignFacing(ScenePanel &panel) const
         return;
     }
     if (n == 1) {
-        // Solo: keep default art direction (face right / stage-left to camera).
+        // Solo: face camera (rpg down row); comic cast unflipped.
         panel.bodies[0].flip = false;
+        panel.bodies[0].rpgFacing = RpgFacing::Down;
         return;
     }
 
     // Face toward the group's horizontal center so speakers look at each other.
-    // flip=false → natural art (faces right); flip=true → mirrored (faces left).
+    // Comic cast: flip=false faces right, flip=true mirrors left.
+    // rpg.actor sheets: use Right/Left rows (no mirror — proper art).
     long sumCx = 0;
     for (const auto &b : panel.bodies) {
         sumCx += (b.box.left + b.box.right) / 2;
@@ -611,14 +636,16 @@ void ComicScene::assignFacing(ScenePanel &panel) const
     for (int i = 0; i < n; ++i) {
         SceneBody &b = panel.bodies[static_cast<size_t>(i)];
         const int cx = (b.box.left + b.box.right) / 2;
+        bool faceLeft = false;
         if (cx < mid) {
-            b.flip = false; // left of center → face right (inward)
+            faceLeft = false; // face right (inward)
         } else if (cx > mid) {
-            b.flip = true; // right of center → face left (inward)
+            faceLeft = true; // face left (inward)
         } else {
-            // Dead center: face the more crowded side, prefer facing right.
-            b.flip = (i >= n / 2);
+            faceLeft = (i >= n / 2);
         }
+        b.flip = faceLeft;
+        b.rpgFacing = faceLeft ? RpgFacing::Left : RpgFacing::Right;
     }
 }
 
@@ -773,12 +800,31 @@ void ComicScene::drawBody(ICanvas *canvas, const SceneBody &body) const
         if (w <= 0 || h <= 0) {
             return;
         }
-        ComicImage tmp = body.customSprite;
-        if (body.flip && !tmp.isNull()) {
-            tmp.qimage() = tmp.qimage().flipped(Qt::Horizontal);
+        ComicImage frame = body.customSprite;
+        if (body.rpgIsSheet && body.rpgColumns > 0 && body.rpgRows > 0 &&
+            !body.customSprite.isNull()) {
+            // Pick walk-sheet cell: idle column, directional row (rpg.actor standard).
+            const int cols = body.rpgColumns;
+            const int rows = body.rpgRows;
+            const int cellW = std::max(1, body.customSprite.width() / cols);
+            const int cellH = std::max(1, body.customSprite.height() / rows);
+            const int col = (cols >= 3) ? 1 : (cols / 2); // idle
+            int row = static_cast<int>(body.rpgFacing);
+            if (row < 0 || row >= rows) {
+                row = 0;
+            }
+            const int x = col * cellW;
+            const int y = row * cellH;
+            if (x + cellW <= body.customSprite.width() &&
+                y + cellH <= body.customSprite.height()) {
+                frame.setQImage(body.customSprite.qimage().copy(x, y, cellW, cellH));
+            }
+            // Sheet directions are real art — do not mirror.
+        } else if (body.flip && !frame.isNull()) {
+            // Single-frame custom art: mirror like classic cast.
+            frame.qimage() = frame.qimage().flipped(Qt::Horizontal);
         }
-        // Pixel art: draw without mask processing (already RGBA with alpha).
-        tmp.draw(canvas, body.box.left, body.box.bottom, w, h);
+        frame.draw(canvas, body.box.left, body.box.bottom, w, h);
         return;
     }
 

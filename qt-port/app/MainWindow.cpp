@@ -15,7 +15,6 @@
 #include <QLineEdit>
 #include <QListWidget>
 #include <QPushButton>
-#include <QRegularExpression>
 #include <QScrollArea>
 #include <QScrollBar>
 #include <QSplitter>
@@ -204,19 +203,21 @@ void MainWindow::updateAuthUi()
     m_logoutBtn->setEnabled(in);
     if (in) {
         const FreeqSession &s = m_auth->session();
-        m_authLabel->setText(QStringLiteral("Signed in: %1").arg(s.handle));
-        if (!s.nick.isEmpty()) {
-            m_nick->setText(s.nick);
-        } else if (!s.handle.isEmpty()) {
-            // IRC-safe-ish nick from handle local part
-            QString n = s.handle.section(QLatin1Char('.'), 0, 0);
-            n.replace(QRegularExpression(QStringLiteral("[^A-Za-z0-9_\\-\\[\\]\\{\\}]")),
-                      QStringLiteral("_"));
-            if (!n.isEmpty()) {
-                m_nick->setText(n.left(16));
-            }
+        // freeq identity: ATProto handle is the human name; DID is crypto id.
+        // IRC nick is usually the same handle (nandi.uk) or mobile_nick_from_handle.
+        const QString identity = s.displayIdentity();
+        QString label = QStringLiteral("Signed in: %1").arg(identity);
+        if (!s.did.isEmpty()) {
+            label += QStringLiteral("  ·  %1").arg(s.did);
         }
-        m_handle->setText(s.handle);
+        m_authLabel->setText(label);
+        // Prefer full ATProto handle as IRC nick (matches freeq web/mobile users).
+        m_nick->setText(s.ircNick());
+        if (!s.handle.isEmpty()) {
+            m_handle->setText(s.handle);
+        } else if (!identity.isEmpty()) {
+            m_handle->setText(identity);
+        }
     } else {
         m_authLabel->setText(QStringLiteral("Guest — login optional for freeq SASL"));
     }
@@ -259,11 +260,24 @@ void MainWindow::onAuthStatus(const QString &msg)
 void MainWindow::onLoginSucceeded(const FreeqSession &session)
 {
     updateAuthUi();
-    appendLog(QStringLiteral("ATProto login OK — %1 (%2)")
-                  .arg(session.handle, session.did));
-    // Fresh web-token already present from broker callback; ready to connect.
-    statusBar()->showMessage(QStringLiteral("Logged in as %1 — hit Connect").arg(session.handle),
-                             8000);
+    appendLog(QStringLiteral("ATProto login OK — handle=%1 nick=%2 did=%3")
+                  .arg(session.handle, session.nick, session.did));
+    // Bind freeq identity → rpg.actor (by DID / live PDS if not in public index).
+    if (m_comic) {
+        if (!session.handle.isEmpty()) {
+            m_comic->rememberAtprotoIdentity(session.handle, session.did);
+        }
+        if (!session.nick.isEmpty() && session.nick != session.handle) {
+            m_comic->rememberAtprotoIdentity(session.nick, session.did);
+        }
+        if (!session.displayIdentity().isEmpty() &&
+            session.displayIdentity() != session.handle &&
+            session.displayIdentity() != session.nick) {
+            m_comic->rememberAtprotoIdentity(session.displayIdentity(), session.did);
+        }
+    }
+    statusBar()->showMessage(
+        QStringLiteral("Logged in as %1 — hit Connect").arg(session.displayIdentity()), 8000);
 }
 
 void MainWindow::onLoginFailed(const QString &reason)
@@ -292,18 +306,24 @@ void MainWindow::doIrcConnect(const FreeqSession &session)
         return;
     }
 
-    QString nick = m_nick->text().trimmed();
-    if (nick.isEmpty() && !session.nick.isEmpty()) {
-        nick = session.nick;
-    }
-    if (nick.isEmpty()) {
-        nick = QStringLiteral("ComicQt");
+    // When authenticated, force IRC nick from freeq/ATProto identity (handle).
+    // Guests keep whatever is in the Nick field.
+    QString nick;
+    if (session.isValid() || session.hasWebToken()) {
+        nick = session.ircNick();
+        m_nick->setText(nick);
+        appendLog(QStringLiteral("Using ATProto identity as nick: %1").arg(nick));
+    } else {
+        nick = m_nick->text().trimmed();
+        if (nick.isEmpty()) {
+            nick = QStringLiteral("ComicQt");
+        }
     }
 
     if (session.hasWebToken()) {
         m_irc->setWebToken(session.webToken);
         m_irc->setAuthenticatedDidHint(session.did);
-        appendLog(QStringLiteral("Connecting with freeq SASL web-token…"));
+        appendLog(QStringLiteral("Connecting with freeq SASL web-token as %1…").arg(nick));
     } else {
         m_irc->setWebToken(QString());
         appendLog(QStringLiteral("Connecting as guest (no web-token)…"));
@@ -342,15 +362,24 @@ void MainWindow::onSay()
         return;
     }
 
-    const QString nick =
-        m_irc->isConnected() ? m_irc->nick() : QStringLiteral("you");
+    // Comic speaker label: prefer ATProto handle (rpg.actor / freeq identity).
+    QString who;
+    if (m_auth && m_auth->isLoggedIn()) {
+        who = m_auth->session().displayIdentity();
+    }
+    if (who.isEmpty() && m_irc->isConnected()) {
+        who = m_irc->nick();
+    }
+    if (who.isEmpty()) {
+        who = QStringLiteral("you");
+    }
 
     if (m_irc->isConnected()) {
         m_irc->sendChannelMessage(text);
     }
 
-    appendLog(QStringLiteral("%1: %2").arg(nick, text));
-    m_comic->addChatLine(text, nick);
+    appendLog(QStringLiteral("%1: %2").arg(who, text));
+    m_comic->addChatLine(text, who);
     m_say->clear();
     statusBar()->showMessage(m_comic->statusLine(), 4000);
     QTimer::singleShot(0, this, &MainWindow::syncComicSize);

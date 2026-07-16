@@ -21,12 +21,41 @@ class QTcpSocket;
 struct FreeqSession {
     QString webToken;    // single-use SASL token (minted by freeq server)
     QString brokerToken; // durable; use with POST /session to mint fresh webToken
-    QString nick;
-    QString did;
-    QString handle;
+    QString nick;        // freeq IRC nick (from mint_web_token / mobile_nick_from_handle)
+    QString did;         // ATProto DID — cryptographic identity
+    QString handle;      // ATProto handle (e.g. nandi.uk) — freeq's display identity
     QString pdsUrl;
-    bool isValid() const { return !brokerToken.isEmpty() && !did.isEmpty(); }
+    bool isValid() const
+    {
+        // Logged in if we can refresh (broker token) and know who we are.
+        return !brokerToken.isEmpty() && (!did.isEmpty() || !handle.isEmpty());
+    }
     bool hasWebToken() const { return !webToken.isEmpty(); }
+
+    // What freeq treats as "you": prefer ATProto handle, then broker nick, then DID.
+    QString displayIdentity() const
+    {
+        if (!handle.isEmpty()) {
+            return handle;
+        }
+        if (!nick.isEmpty()) {
+            return nick;
+        }
+        return did;
+    }
+
+    // Nick to send in IRC NICK. freeq users commonly connect as their handle
+    // (nandi.uk, standefer.com). Prefer handle, then broker-minted nick.
+    QString ircNick() const
+    {
+        if (!handle.isEmpty()) {
+            return handle;
+        }
+        if (!nick.isEmpty()) {
+            return nick;
+        }
+        return QStringLiteral("ComicQt");
+    }
 };
 
 class FreeqAuth : public QObject {

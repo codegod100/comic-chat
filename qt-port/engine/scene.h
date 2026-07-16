@@ -46,6 +46,14 @@ struct SceneBalloon {
 #define AT_CUSTOM 3
 #endif
 
+// rpg.actor walk-sheet row indices (dev-guide standard).
+enum class RpgFacing : int {
+    Down = 0,
+    Left = 1,
+    Right = 2,
+    Up = 3,
+};
+
 struct SceneBody {
     USHORT facePose = 0;
     USHORT torsoPose = 0;
@@ -58,11 +66,15 @@ struct SceneBody {
     RECT headBox{};
     RECT torsoBox{};
     int arrowX = 0;
-    bool flip = false; // true = face left (horizontally mirrored art)
+    bool flip = false; // comic-cast: true = horizontal mirror (face left)
     std::string avatarName; // art character name (anna, dan, …) or rpg handle
     std::string nick;       // speaker nick that owns this body in the panel
-    // When type == AT_CUSTOM: full-body (or bust) image, usually an idle frame.
+    // AT_CUSTOM: prefer full walk sheet + grid so we can pick left/right rows.
     ComicImage customSprite;
+    bool rpgIsSheet = false; // true → customSprite is full sheet, use rpgFacing row
+    int rpgColumns = 3;
+    int rpgRows = 4;
+    RpgFacing rpgFacing = RpgFacing::Down;
 };
 
 struct ScenePanel {
@@ -102,9 +114,10 @@ public:
                       UCHAR mode = SM_SAY, const std::string &nick = "you");
 
     // Prefer this image for the nick (rpg.actor sprite). Empty image clears override.
-    // Optional label is used as avatarName (e.g. handle or displayName).
+    // Pass a full walk sheet (isSheet=true) with columns/rows for directional facing.
     void setRpgSpriteForNick(const std::string &nick, const ComicImage &sprite,
-                             const std::string &label = {});
+                             const std::string &label = {}, bool isSheet = false,
+                             int columns = 3, int rows = 4);
     bool hasRpgSpriteForNick(const std::string &nick) const;
 
     int panelCount() const { return static_cast<int>(m_panels.size()); }
@@ -151,9 +164,15 @@ private:
 
     std::vector<LoadedAvatar> m_avatars;
     std::map<std::string, int> m_nickToAvatar;
+    struct RpgSpriteOverride {
+        ComicImage image;
+        std::string label;
+        bool isSheet = false;
+        int columns = 3;
+        int rows = 4;
+    };
     // Nick key → rpg.actor (or other) custom sprite override.
-    std::map<std::string, ComicImage> m_nickRpgSprites;
-    std::map<std::string, std::string> m_nickRpgLabels;
+    std::map<std::string, RpgSpriteOverride> m_nickRpgSprites;
     int m_nextAssign = 0;
     ComicImage m_backdrop;
     std::vector<ScenePanel> m_panels;

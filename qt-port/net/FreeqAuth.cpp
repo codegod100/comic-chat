@@ -280,17 +280,35 @@ bool FreeqAuth::applyOauthPayload(const QByteArray &b64url)
     }
     const QJsonObject o = doc.object();
     FreeqSession sess;
+    // freeq-auth-broker #oauth= payload (see freeq-auth-broker auth_callback):
+    //   token, broker_token, nick, did, handle, pds_url
+    // Also accept a few aliases used by mobile /session variants.
     sess.webToken = o.value(QStringLiteral("token")).toString();
+    if (sess.webToken.isEmpty()) {
+        sess.webToken = o.value(QStringLiteral("web_token")).toString();
+    }
     sess.brokerToken = o.value(QStringLiteral("broker_token")).toString();
     sess.nick = o.value(QStringLiteral("nick")).toString();
     sess.did = o.value(QStringLiteral("did")).toString();
     sess.handle = o.value(QStringLiteral("handle")).toString();
+    if (sess.handle.isEmpty()) {
+        // Some paths only return alsoKnownAs-style identity
+        sess.handle = o.value(QStringLiteral("displayHandle")).toString();
+    }
     sess.pdsUrl = o.value(QStringLiteral("pds_url")).toString();
+    if (sess.pdsUrl.isEmpty()) {
+        sess.pdsUrl = o.value(QStringLiteral("pds")).toString();
+    }
     if (sess.brokerToken.isEmpty() && sess.webToken.isEmpty()) {
         return false;
     }
-    if (sess.nick.isEmpty()) {
+    // freeq: if mint failed, nick falls back to handle; keep that invariant.
+    if (sess.nick.isEmpty() && !sess.handle.isEmpty()) {
         sess.nick = sess.handle;
+    }
+    // If we only got a nick that looks like a handle, treat it as handle too.
+    if (sess.handle.isEmpty() && sess.nick.contains(QLatin1Char('.'))) {
+        sess.handle = sess.nick;
     }
     m_session = sess;
     return m_session.isValid() || m_session.hasWebToken();
@@ -338,6 +356,9 @@ void FreeqAuth::refreshWebToken()
         }
         const QJsonObject o = doc.object();
         m_session.webToken = o.value(QStringLiteral("token")).toString();
+        if (m_session.webToken.isEmpty()) {
+            m_session.webToken = o.value(QStringLiteral("web_token")).toString();
+        }
         const QString nick = o.value(QStringLiteral("nick")).toString();
         if (!nick.isEmpty()) {
             m_session.nick = nick;
@@ -350,6 +371,13 @@ void FreeqAuth::refreshWebToken()
         if (!handle.isEmpty()) {
             m_session.handle = handle;
         }
+        // Keep handle authoritative when freeq nick is the handle-derived alias.
+        if (m_session.handle.isEmpty() && m_session.nick.contains(QLatin1Char('.'))) {
+            m_session.handle = m_session.nick;
+        }
+        if (m_session.nick.isEmpty() && !m_session.handle.isEmpty()) {
+            m_session.nick = m_session.handle;
+        }
         if (m_session.webToken.isEmpty()) {
             emit loginFailed(
                 QStringLiteral("Broker returned empty web-token (server may not mint "
@@ -357,7 +385,8 @@ void FreeqAuth::refreshWebToken()
             return;
         }
         persistSession();
-        emit statusMessage(QStringLiteral("Session ready as %1").arg(m_session.handle));
+        emit statusMessage(
+            QStringLiteral("Session ready as %1").arg(m_session.displayIdentity()));
         emit sessionRefreshed(m_session);
     });
 }

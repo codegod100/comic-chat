@@ -60,6 +60,16 @@ int ComicWidget::contentWidth() const
     return m_scene.contentWidthForHeight(usable) + 2 * m_margin;
 }
 
+void ComicWidget::rememberAtprotoIdentity(const QString &handleOrNick, const QString &did)
+{
+    if (handleOrNick.isEmpty() || did.isEmpty()) {
+        return;
+    }
+    m_rpg.rememberDidForNick(handleOrNick, did);
+    // Preload sprite for this identity (registry or live PDS).
+    ensureRpgSprite(handleOrNick);
+}
+
 void ComicWidget::ensureRpgSprite(const QString &nick)
 {
     if (nick.isEmpty()) {
@@ -68,22 +78,22 @@ void ComicWidget::ensureRpgSprite(const QString &nick)
     if (m_scene.hasRpgSpriteForNick(nick.toStdString())) {
         return;
     }
-    auto ref = m_rpg.lookupNick(nick);
-    if (!ref || !ref->hasSprite) {
+    // Full walk sheet for left/right/down facing (rpg.actor 3×4 standard).
+    // Registry first, then live PDS if not indexed yet.
+    auto sheet = m_rpg.spriteSheetForNick(nick, 6000);
+    if (!sheet || sheet->isNull()) {
         return;
     }
-    auto sprite = m_rpg.spriteForNick(nick, 4000);
-    if (!sprite || sprite->isNull()) {
-        return;
+    QString label = nick;
+    if (auto ref = m_rpg.lookupNick(nick)) {
+        if (!ref->displayName.isEmpty()) {
+            label = ref->displayName;
+        } else if (!ref->handle.isEmpty()) {
+            label = ref->handle;
+        }
     }
-    QString label = ref->displayName;
-    if (label.isEmpty()) {
-        label = ref->handle;
-    }
-    if (label.isEmpty()) {
-        label = nick;
-    }
-    m_scene.setRpgSpriteForNick(nick.toStdString(), *sprite, label.toStdString());
+    m_scene.setRpgSpriteForNick(nick.toStdString(), sheet->sheet, label.toStdString(),
+                                /*isSheet=*/true, sheet->columns, sheet->rows);
 }
 
 bool ComicWidget::looksLikeImageUrl(const QUrl &url)

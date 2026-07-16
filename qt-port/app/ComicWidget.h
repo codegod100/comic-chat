@@ -23,6 +23,9 @@ public:
     void clearPanels();
     QString statusLine() const;
 
+    // freeq/ATProto: remember DID for a nick so rpg.actor can resolve by DID.
+    void rememberAtprotoIdentity(const QString &handleOrNick, const QString &did);
+
     void setViewportHeight(int h);
     int viewportHeight() const { return m_viewportH; }
 
