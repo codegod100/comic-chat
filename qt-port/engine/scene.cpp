@@ -71,6 +71,20 @@ void ComicScene::clear()
                         : "Cleared";
 }
 
+void ComicScene::trimToMaxPanels(int maxPanels)
+{
+    if (maxPanels < 1) {
+        m_panels.clear();
+        return;
+    }
+    if (static_cast<int>(m_panels.size()) <= maxPanels) {
+        return;
+    }
+    const size_t drop = m_panels.size() - static_cast<size_t>(maxPanels);
+    m_panels.erase(m_panels.begin(), m_panels.begin() + static_cast<std::ptrdiff_t>(drop));
+    m_status = "Panels: " + std::to_string(m_panels.size()) + " (showing latest)";
+}
+
 std::string ComicScene::nickKey(const std::string &nick)
 {
     std::string k = nick.empty() ? "you" : nick;
@@ -194,6 +208,51 @@ bool ComicScene::hasRpgSpriteForNick(const std::string &nick) const
 {
     auto it = m_nickRpgSprites.find(nickKey(nick));
     return it != m_nickRpgSprites.end() && !it->second.image.isNull();
+}
+
+void ComicScene::refreshBodiesForNick(const std::string &nick)
+{
+    const std::string key = nickKey(nick);
+    if (key.empty()) {
+        return;
+    }
+    for (auto &panel : m_panels) {
+        bool dirty = false;
+        for (auto &body : panel.bodies) {
+            if (nickKey(body.nick) == key) {
+                // Re-resolve so late rpg.actor loads replace cast placeholders.
+                body = bodyForNick(body.nick);
+                dirty = true;
+            }
+        }
+        if (dirty) {
+            layoutPanel(panel);
+        }
+    }
+}
+
+std::vector<std::string> ComicScene::nicksOnStage() const
+{
+    std::vector<std::string> out;
+    for (const auto &panel : m_panels) {
+        for (const auto &body : panel.bodies) {
+            if (body.nick.empty()) {
+                continue;
+            }
+            const std::string k = nickKey(body.nick);
+            bool seen = false;
+            for (const auto &e : out) {
+                if (nickKey(e) == k) {
+                    seen = true;
+                    break;
+                }
+            }
+            if (!seen) {
+                out.push_back(body.nick);
+            }
+        }
+    }
+    return out;
 }
 
 SceneBody ComicScene::bodyForNick(const std::string &nick)
@@ -332,33 +391,47 @@ void ComicScene::layoutBalloon(SceneBalloon &b, const SceneBody &body, int ballo
     b.speakerTop = body.box.top;
 
     // ── Image photo frame (freeq media / bare image URL) ────────────────
+    // Panel Y: top > bottom (e.g. top=-160, bot=-3000). Height = top - bot.
+    // Target ~80%×55% of panel (pre-bounds “large preview”), then fit to room.
     if (b.hasImage()) {
         const int iw = std::max(1, b.image.width());
         const int ih = std::max(1, b.image.height());
-        // Large photo frame in the upper half so chat images are easy to read.
-        // Allow upscaling small sources (thumbnails / pixel art) to fill the frame.
-        const int maxImgW = UNIT_PANEL_W * (balloonCount > 2 ? 52 : (balloonCount > 1 ? 62 : 78)) / 100;
-        const int maxImgH = UNIT_PANEL_H * (balloonCount > 1 ? 42 : 52) / 100;
-        const double scale = std::min(double(maxImgW) / iw, double(maxImgH) / ih);
-        int imgW = std::max(400, int(std::lround(iw * scale)));
-        int imgH = std::max(400, int(std::lround(ih * scale)));
-        // Never exceed the max box even if min floor pushed us over.
-        if (imgW > maxImgW) {
-            imgH = std::max(1, imgH * maxImgW / imgW);
-            imgW = maxImgW;
-        }
-        if (imgH > maxImgH) {
-            imgW = std::max(1, imgW * maxImgH / imgH);
-            imgH = maxImgH;
-        }
+        constexpr int kImgStubGap = 100;
+        constexpr int kFramePad = 60;
+        constexpr int kSideMargin = 50;
 
+        // Desired large size (solo / 2-speaker / crowded).
+        const int wantImgW =
+            UNIT_PANEL_W * (balloonCount > 2 ? 62 : (balloonCount > 1 ? 74 : 86)) / 100;
+        const int wantImgH =
+            UNIT_PANEL_H * (balloonCount > 1 ? 50 : 60) / 100;
+
+        // Room above the character. topLimit is higher on screen (larger Y).
+        const int cardTopLimit = -kTopMargin;                 // e.g. -160
+        const int cardBotLimit = body.box.top + kImgStubGap;  // e.g. -2200
+        // CRITICAL: height = top - bot (not bot - top) in this coordinate system.
+        const int roomH = std::max(1200, cardTopLimit - cardBotLimit);
+        const int roomW = UNIT_PANEL_W - 2 * kSideMargin;
+
+        b.lines = wrapText(b.text, std::max(200, wantImgW));
         const int captionLines =
-            (b.text.empty() ? 0 : std::max(1, (int)wrapText(b.text, maxImgW - 2 * padX).size())) +
-            (b.nick.empty() ? 0 : 1);
-        const int captionH = captionLines > 0 ? captionLines * lineH + padY : 0;
-        const int framePad = 80;
-        const int totalH = imgH + 2 * framePad + captionH;
-        const int totalW = imgW + 2 * framePad;
+            (b.nick.empty() ? 0 : 1) + static_cast<int>(b.lines.size());
+        const int captionH =
+            captionLines > 0 ? captionLines * lineH + padY : padY / 2;
+        const int chromeH = 2 * kFramePad + captionH;
+
+        const int maxImgW = std::max(800, std::min(wantImgW, roomW - 2 * kFramePad));
+        const int maxImgH = std::max(800, std::min(wantImgH, roomH - chromeH));
+
+        const double scale = std::min(double(maxImgW) / iw, double(maxImgH) / ih);
+        int imgW = std::max(1, int(std::lround(iw * scale)));
+        int imgH = std::max(1, int(std::lround(ih * scale)));
+        imgW = std::min(imgW, maxImgW);
+        imgH = std::min(imgH, maxImgH);
+        b.lines = wrapText(b.text, imgW);
+
+        const int totalW = imgW + 2 * kFramePad;
+        const int totalH = imgH + 2 * kFramePad + captionH;
 
         int cx = body.arrowX;
         if (balloonCount > 1) {
@@ -366,32 +439,46 @@ void ComicScene::layoutBalloon(SceneBalloon &b, const SceneBody &body, int ballo
             cx += (balloonIndex - (balloonCount - 1) / 2) *
                   (spread / std::max(1, balloonCount - 1));
         }
-        cx = std::max(totalW / 2 + 80, std::min(UNIT_PANEL_W - totalW / 2 - 80, cx));
+        cx = std::max(totalW / 2 + kSideMargin,
+                      std::min(UNIT_PANEL_W - totalW / 2 - kSideMargin, cx));
 
-        int bot = body.box.top + kTailGap + balloonIndex * (totalH / 4);
-        int top = bot + totalH;
-        if (top > -kTopMargin) {
-            const int over = top - (-kTopMargin);
-            top -= over;
-            bot -= over;
+        // Hang from top of panel so photos stay large.
+        int top = cardTopLimit;
+        int bot = top - totalH; // totalH down from top → more negative
+        if (bot < cardBotLimit) {
+            // Would overlap character — pin bottom, re-check top.
+            bot = cardBotLimit;
+            top = bot + totalH;
+            if (top > cardTopLimit) {
+                // Still too tall: shrink image to remaining height (keep aspect).
+                top = cardTopLimit;
+                const int fitH = std::max(400, top - bot - chromeH);
+                if (imgH > fitH) {
+                    imgW = std::max(1, imgW * fitH / imgH);
+                    imgH = fitH;
+                }
+                bot = top - (imgH + chromeH);
+            }
         }
 
         b.cloudBox.left = cx - totalW / 2;
         b.cloudBox.right = cx + totalW / 2;
+        // Recompute totalW if imgW shrank above.
+        const int finalW = imgW + 2 * kFramePad;
+        b.cloudBox.left = cx - finalW / 2;
+        b.cloudBox.right = cx + finalW / 2;
         b.cloudBox.top = top;
         b.cloudBox.bottom = bot;
 
-        b.imageBox.left = b.cloudBox.left + framePad;
-        b.imageBox.right = b.cloudBox.right - framePad;
-        b.imageBox.top = b.cloudBox.top - framePad;
+        b.imageBox.left = b.cloudBox.left + kFramePad;
+        b.imageBox.right = b.cloudBox.right - kFramePad;
+        b.imageBox.top = b.cloudBox.top - kFramePad;
         b.imageBox.bottom = b.imageBox.top - imgH;
 
         b.textBox.left = b.imageBox.left;
         b.textBox.right = b.imageBox.right;
-        b.textBox.top = b.imageBox.bottom - (captionH > 0 ? padY / 2 : 0);
-        b.textBox.bottom = b.cloudBox.bottom + framePad / 2;
-
-        b.lines = wrapText(b.text, imgW);
+        b.textBox.top = b.imageBox.bottom - padY / 3;
+        b.textBox.bottom = b.cloudBox.bottom + kFramePad / 2;
         return;
     }
 
@@ -751,7 +838,10 @@ void ComicScene::addImageLine(const ComicImage &image, const std::string &captio
         bal.image = image;
     }
 
-    if (shouldStartNewPanel(who)) {
+    // Photos always get their own panel — never merge into a multi-balloon
+    // frame (that made one image appear "on" several chats visually).
+    const bool forceNew = !image.isNull() || shouldStartNewPanel(who);
+    if (forceNew || m_panels.empty()) {
         ScenePanel panel;
         panel.seed = static_cast<unsigned>(m_panels.size() + 1);
         panel.bodies.push_back(std::move(speaker));
@@ -965,37 +1055,38 @@ void ComicScene::drawBalloon(ICanvas *canvas, const SceneBalloon &b) const
     }
 
     if (b.hasImage()) {
+        // White photo card + border; trust layout boxes (already fitted).
         RECT frame{L, T, R, Btm};
-        canvas->setBrush(fill);
-        canvas->setPen(stroke, strokeW);
+        canvas->save();
+        canvas->setClipRect(frame);
+        canvas->setBrush(CanvasColor::rgb(255, 255, 255));
+        canvas->setPen(CanvasColor::rgb(20, 20, 20), 40);
         canvas->fillRect(frame);
         canvas->drawRect(frame);
 
-        canvas->setBrush(fill);
-        canvas->beginPath();
-        canvas->moveTo(mx - 100, Btm);
-        canvas->lineTo(b.speakerArrowX, b.speakerTop + 120);
-        canvas->lineTo(mx + 100, Btm);
-        canvas->closePath();
-        canvas->strokeAndFill();
+        const int diw = std::max(1, b.imageBox.right - b.imageBox.left);
+        const int dih = std::max(1, b.imageBox.top - b.imageBox.bottom);
+        const int imgLeft = b.imageBox.left;
+        const int imgTop = b.imageBox.top;
+        const int imgBottom = b.imageBox.bottom;
 
-        const int iw = b.imageBox.right - b.imageBox.left;
-        const int ih = b.imageBox.top - b.imageBox.bottom;
-        if (iw > 0 && ih > 0 && !b.image.isNull()) {
-            RECT ir = b.imageBox;
-            ir.left -= 20;
-            ir.right += 20;
-            ir.top += 20;
-            ir.bottom -= 20;
-            canvas->setPen(CanvasColor::rgb(40, 40, 40), 24);
+        if (!b.image.isNull() && diw > 0 && dih > 0) {
+            RECT ir{imgLeft - 10, imgTop + 10, imgLeft + diw + 10, imgBottom - 10};
+            ir.left = std::max(ir.left, L + 16);
+            ir.right = std::min(ir.right, R - 16);
+            ir.top = std::min(ir.top, T - 16);
+            ir.bottom = std::max(ir.bottom, Btm + 16);
+            canvas->setPen(CanvasColor::rgb(40, 40, 40), 20);
             canvas->setNoBrush();
             canvas->drawRect(ir);
-            b.image.draw(canvas, b.imageBox.left, b.imageBox.bottom, iw, ih);
+            b.image.draw(canvas, imgLeft, imgBottom, diw, dih);
         }
 
+        // Caption under the image, inside the card.
         canvas->setFont("Sans Serif", m_fontPoint, false);
         canvas->setPen(CanvasColor::rgb(0, 0, 0), 1);
-        int y = b.imageBox.bottom - lineH;
+        int y = imgBottom - lineH;
+        const int yMin = Btm + lineH;
         if (!b.nick.empty()) {
             canvas->setFont("Sans Serif", std::max(8, m_fontPoint - 1), true);
             canvas->setPen(mode == SM_REPLY ? CanvasColor::rgb(30, 80, 160)
@@ -1004,16 +1095,34 @@ void ComicScene::drawBalloon(ICanvas *canvas, const SceneBalloon &b) const
             const std::string label =
                 (mode == SM_REPLY ? std::string("\xE2\x86\xA9 ") : std::string()) + b.nick + ":";
             const int lw = measureLogical(label);
-            canvas->drawText((b.textBox.left + b.textBox.right - lw) / 2, y, label);
+            if (y > yMin) {
+                canvas->drawText((L + R - lw) / 2, y, label);
+            }
             canvas->setFont("Sans Serif", m_fontPoint, false);
             canvas->setPen(CanvasColor::rgb(0, 0, 0), 1);
             y -= lineH;
         }
         for (const auto &ln : b.lines) {
-            const int x = (b.textBox.left + b.textBox.right - ln.width) / 2;
+            if (y <= yMin) {
+                break;
+            }
+            const int x = (L + R - ln.width) / 2;
             canvas->drawText(x, y, ln.text);
             y -= lineH;
         }
+        canvas->restore();
+
+        // Short stub under the card.
+        const int baseHalf = std::min(240, std::max(140, (R - L) / 9));
+        const int tipY = std::max(b.speakerTop + 60, Btm - 180);
+        canvas->setBrush(CanvasColor::rgb(255, 255, 255));
+        canvas->setPen(CanvasColor::rgb(20, 20, 20), 36);
+        canvas->beginPath();
+        canvas->moveTo(mx - baseHalf, Btm);
+        canvas->lineTo(mx, tipY);
+        canvas->lineTo(mx + baseHalf, Btm);
+        canvas->closePath();
+        canvas->strokeAndFill();
         return;
     }
 
@@ -1128,6 +1237,8 @@ void ComicScene::drawPanel(ICanvas *canvas, const ScenePanel &panel, const RECT 
     canvas->save();
     canvas->setLogicalOrigin(pixelRect.left, pixelRect.top);
     canvas->setLogicalScale(sx, -sy);
+    // Keep balloons/images from bleeding into neighboring panels in the strip.
+    canvas->setClipRect(RECT{0, 0, UNIT_PANEL_W, -UNIT_PANEL_H});
 
     RECT full{0, 0, UNIT_PANEL_W, -UNIT_PANEL_H};
     canvas->setBrush(CanvasColor::rgb(245, 240, 230));

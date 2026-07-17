@@ -252,7 +252,10 @@ bool RpgActorClient::downloadBytes(const QUrl &url, QByteArray &out, int timeout
         QObject::connect(reply, &QNetworkReply::finished, &loop, &QEventLoop::quit);
     }
     timer.start(std::max(500, timeoutMs));
-    loop.exec();
+    // ExcludeSocketNotifiers would block QNetworkReply completion on some
+    // platforms; we rely on callers not invoking this from IRC processLine.
+    // ExcludeUserInputEvents avoids UI re-entrancy during sprite fetch.
+    loop.exec(QEventLoop::ExcludeUserInputEvents);
 
     if (!reply) {
         return false;
@@ -522,24 +525,50 @@ std::optional<RpgSpriteSheet> RpgActorClient::loadSheetForRef(const RpgActorRef 
     return asset;
 }
 
+std::optional<RpgSpriteSheet> RpgActorClient::cachedSheetForNick(const QString &nick) const
+{
+    const QString key = nickKey(nick);
+    if (key.isEmpty()) {
+        return std::nullopt;
+    }
+    auto cached = m_sheetCache.constFind(key);
+    if (cached != m_sheetCache.constEnd() && !cached->isNull()) {
+        return cached.value();
+    }
+    // Also try DID / handle aliases already indexed in cache keys.
+    if (m_nickToDid.contains(key)) {
+        auto byDid = m_sheetCache.constFind(nickKey(m_nickToDid.value(key)));
+        if (byDid != m_sheetCache.constEnd() && !byDid->isNull()) {
+            return byDid.value();
+        }
+    }
+    return std::nullopt;
+}
+
 std::optional<RpgSpriteSheet> RpgActorClient::spriteSheetForNick(const QString &nick,
-                                                                 int timeoutMs)
+                                                                 int timeoutMs,
+                                                                 bool allowLiveFetch)
 {
     const QString key = nickKey(nick);
     if (key.isEmpty()) {
         return std::nullopt;
     }
 
-    auto cached = m_sheetCache.constFind(key);
-    if (cached != m_sheetCache.constEnd() && !cached->isNull()) {
-        return cached.value();
+    if (auto hit = cachedSheetForNick(nick)) {
+        return hit;
     }
 
     auto ref = lookupKey(key);
-    if (!ref || !ref->hasSprite || ref->spriteUrl.isEmpty()) {
+    if ((!ref || !ref->hasSprite || ref->spriteUrl.isEmpty()) && allowLiveFetch) {
         ref = fetchLiveActor(nick, timeoutMs);
     }
     if (!ref || !ref->hasSprite || ref->spriteUrl.isEmpty()) {
+        return std::nullopt;
+    }
+
+    // No network for sheet bytes if allowLiveFetch is false (registry URL only
+    // when already cached above). Download still needs allowLiveFetch true.
+    if (!allowLiveFetch) {
         return std::nullopt;
     }
 

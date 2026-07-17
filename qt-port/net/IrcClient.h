@@ -36,6 +36,10 @@ public slots:
     void sendRaw(const QString &line);
     void sendPrivmsg(const QString &target, const QString &text);
     void sendChannelMessage(const QString &text);
+    // freeq: PRIVMSG with +reply=<msgid> (IRCv3 message-tags).
+    void sendChannelReply(const QString &parentMsgId, const QString &text);
+    void sendTaggedPrivmsg(const QString &target, const QString &text,
+                           const QHash<QString, QString> &tags);
     // freeq / IRCv3 draft/chathistory — fill msgid cache for +reply parents.
     void requestHistoryLatest(int count = 80);
 
@@ -44,7 +48,7 @@ signals:
     void disconnected();
     void statusMessage(const QString &msg);
     // tags may include freeq media-url, content-type, media-alt, msgid, +reply, …
-    // history=true for join-replay / CHATHISTORY (cache parents, don't comic-panel).
+    // history=true for join-replay / CHATHISTORY batches (shown like live chat).
     void channelMessage(const QString &nick, const QString &text,
                         const QHash<QString, QString> &tags, bool history);
     void serverNotice(const QString &text);
@@ -52,6 +56,8 @@ signals:
     void saslSucceeded(const QString &did);
     void saslFailed(const QString &reason);
     void channelJoined(const QString &channel);
+    // Join-replay / CHATHISTORY batch closed (flush deferred comic history).
+    void historyBatchEnded();
 
 private slots:
     void onConnected();
@@ -77,6 +83,8 @@ private:
     // IRCv3: @key=value;key2=value2  → map (unescaped values)
     static QHash<QString, QString> parseTags(const QString &tagStr);
     static QString unescapeTagValue(const QString &v);
+    static QString escapeTagValue(const QString &v);
+    static QString formatTagString(const QHash<QString, QString> &tags);
 
     QAbstractSocket *m_socket = nullptr;
     QByteArray m_buffer;

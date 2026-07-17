@@ -58,7 +58,12 @@ public:
     std::optional<RpgActorRef> lookupNick(const QString &nick) const;
 
     // Full walk sheet for directional facing (preferred for multi-speaker panels).
-    std::optional<RpgSpriteSheet> spriteSheetForNick(const QString &nick, int timeoutMs = 5000);
+    // allowLiveFetch: if false, only registry + already-cached sheets (no PDS hop).
+    std::optional<RpgSpriteSheet> spriteSheetForNick(const QString &nick, int timeoutMs = 5000,
+                                                     bool allowLiveFetch = true);
+
+    // Memory cache only — never hits the network (fast path for join/history).
+    std::optional<RpgSpriteSheet> cachedSheetForNick(const QString &nick) const;
 
     // Idle *down* frame only (compat). Prefer spriteSheetForNick for facing.
     std::optional<ComicImage> spriteForNick(const QString &nick, int timeoutMs = 5000);

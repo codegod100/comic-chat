@@ -178,6 +178,75 @@ void IrcClient::sendChannelMessage(const QString &text)
     sendPrivmsg(m_channel, text);
 }
 
+void IrcClient::sendChannelReply(const QString &parentMsgId, const QString &text)
+{
+    if (m_channel.isEmpty()) {
+        emit errorOccurred(QStringLiteral("No channel joined"));
+        return;
+    }
+    if (parentMsgId.trimmed().isEmpty()) {
+        sendChannelMessage(text);
+        return;
+    }
+    QHash<QString, QString> tags;
+    tags.insert(QStringLiteral("+reply"), parentMsgId.trimmed());
+    sendTaggedPrivmsg(m_channel, text, tags);
+}
+
+void IrcClient::sendTaggedPrivmsg(const QString &target, const QString &text,
+                                  const QHash<QString, QString> &tags)
+{
+    if (target.isEmpty() || text.isEmpty()) {
+        return;
+    }
+    const QString tagStr = formatTagString(tags);
+    if (tagStr.isEmpty()) {
+        writeLine(QStringLiteral("PRIVMSG %1 :%2").arg(target, text));
+        return;
+    }
+    writeLine(QStringLiteral("@%1 PRIVMSG %2 :%3").arg(tagStr, target, text));
+}
+
+QString IrcClient::escapeTagValue(const QString &v)
+{
+    // IRCv3: ; → \:  space → \s  \ → \\  CR → \r  LF → \n
+    QString out;
+    out.reserve(v.size() + 4);
+    for (const QChar c : v) {
+        if (c == QLatin1Char(';')) {
+            out += QStringLiteral("\\:");
+        } else if (c == QLatin1Char(' ')) {
+            out += QStringLiteral("\\s");
+        } else if (c == QLatin1Char('\\')) {
+            out += QStringLiteral("\\\\");
+        } else if (c == QLatin1Char('\r')) {
+            out += QStringLiteral("\\r");
+        } else if (c == QLatin1Char('\n')) {
+            out += QStringLiteral("\\n");
+        } else {
+            out += c;
+        }
+    }
+    return out;
+}
+
+QString IrcClient::formatTagString(const QHash<QString, QString> &tags)
+{
+    QStringList parts;
+    parts.reserve(tags.size());
+    for (auto it = tags.constBegin(); it != tags.constEnd(); ++it) {
+        if (it.key().isEmpty()) {
+            continue;
+        }
+        if (it.value().isEmpty()) {
+            parts << it.key();
+        } else {
+            parts << (it.key() + QLatin1Char('=') + escapeTagValue(it.value()));
+        }
+    }
+    return parts.join(QLatin1Char(';'));
+}
+
 void IrcClient::writeLine(const QString &line)
 {
     if (!m_socket || m_socket->state() != QAbstractSocket::ConnectedState) {
@@ -685,9 +754,10 @@ void IrcClient::processLine(const QString &line)
             }
         } else if (ref.startsWith(QLatin1Char('-'))) {
             const QString id = ref.mid(1);
-            if (id == m_historyBatchId) {
+            if (id == m_historyBatchId || m_inHistoryBatch) {
                 m_historyBatchId.clear();
                 m_inHistoryBatch = false;
+                emit historyBatchEnded();
             }
         }
         return;
@@ -702,7 +772,8 @@ void IrcClient::processLine(const QString &line)
             // freeq also join-replays history; CHATHISTORY fills DB history too.
             if (m_ackedCaps.contains(QStringLiteral("draft/chathistory")) ||
                 m_capLsAccum.contains(QLatin1String("draft/chathistory"), Qt::CaseInsensitive)) {
-                requestHistoryLatest(80);
+                // Enough for the log; comic only paints the last 10 anyway.
+                requestHistoryLatest(40);
             }
         }
         return;

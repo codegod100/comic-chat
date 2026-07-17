@@ -8,20 +8,96 @@
 #include "engine/pose.h"
 #include "platform/QtCanvas.h"
 
+#include <QApplication>
+#include <QDialog>
+#include <QGuiApplication>
+#include <QHBoxLayout>
+#include <QLabel>
+#include <QMouseEvent>
 #include <QNetworkReply>
 #include <QNetworkRequest>
 #include <QPaintEvent>
 #include <QPainter>
+#include <QPushButton>
 #include <QRegularExpression>
+#include <QScreen>
 #include <QSettings>
 #include <QShowEvent>
+#include <QStyle>
+#include <QTimer>
 #include <QUrl>
+#include <QVBoxLayout>
+
+#include <cmath>
 
 namespace {
 bool contentTypeIsImage(const QString &ct)
 {
     return ct.startsWith(QLatin1String("image/"), Qt::CaseInsensitive);
 }
+
+class ImageLightboxDialog : public QDialog {
+public:
+    explicit ImageLightboxDialog(QWidget *parent, const QImage &image)
+        : QDialog(parent, Qt::Dialog | Qt::WindowCloseButtonHint)
+    {
+        setWindowTitle(QObject::tr("Image preview"));
+        setModal(true);
+
+        auto *closeBtn = new QPushButton(QStringLiteral("×"), this);
+        closeBtn->setToolTip(QObject::tr("Close"));
+        closeBtn->setFlat(true);
+        closeBtn->setCursor(Qt::PointingHandCursor);
+        closeBtn->setStyleSheet(QStringLiteral(
+            "QPushButton { color: #ffffff; background: #333333; "
+            "border: none; font-weight: bold; font-size: 16px; padding: 4px 10px; }"
+            "QPushButton:hover { background: #555555; }"));
+        connect(closeBtn, &QPushButton::clicked, this, &QDialog::reject);
+
+        auto *topBar = new QHBoxLayout();
+        topBar->addStretch();
+        topBar->addWidget(closeBtn);
+        topBar->setContentsMargins(6, 6, 6, 0);
+
+        auto *imgLabel = new QLabel(this);
+        imgLabel->setAlignment(Qt::AlignCenter);
+        imgLabel->setStyleSheet(QStringLiteral("background: #1a1a1a;"));
+        imgLabel->setCursor(Qt::PointingHandCursor);
+
+        const QScreen *screen = QGuiApplication::primaryScreen();
+        const QRect avail = screen ? screen->availableGeometry() : QRect();
+        const QSize maxSize = avail.isEmpty()
+                                  ? QSize(1200, 800)
+                                  : QSize(avail.width() * 9 / 10, avail.height() * 9 / 10);
+
+        QSize outSize = image.size();
+        if (outSize.width() > maxSize.width() || outSize.height() > maxSize.height()) {
+            outSize.scale(maxSize, Qt::KeepAspectRatio);
+        }
+        if (!outSize.isValid() || outSize.isEmpty()) {
+            outSize = QSize(320, 240);
+        }
+
+        const QImage scaled =
+            image.scaled(outSize, Qt::KeepAspectRatio, Qt::SmoothTransformation);
+        imgLabel->setPixmap(QPixmap::fromImage(scaled));
+        imgLabel->setFixedSize(scaled.size());
+
+        auto *layout = new QVBoxLayout(this);
+        layout->setContentsMargins(0, 0, 0, 0);
+        layout->setSpacing(0);
+        layout->addLayout(topBar);
+        layout->addWidget(imgLabel, 1, Qt::AlignCenter);
+
+        setFixedSize(layout->sizeHint());
+        if (!avail.isEmpty()) {
+            move(QStyle::alignedRect(Qt::LeftToRight, Qt::AlignCenter, size(), avail).topLeft());
+        } else if (parent) {
+            const QPoint parentCenter = parent->mapToGlobal(QPoint(parent->width() / 2, parent->height() / 2));
+            move(parentCenter - QPoint(width() / 2, height() / 2));
+        }
+    }
+};
 } // namespace
 
 ComicWidget::ComicWidget(QWidget *parent)
@@ -31,10 +107,23 @@ ComicWidget::ComicWidget(QWidget *parent)
     setBackgroundRole(QPalette::Base);
     setAutoFillBackground(true);
     setSizePolicy(QSizePolicy::Minimum, QSizePolicy::Expanding);
+    setMouseTracking(true);
 
     connect(&m_rpg, &RpgActorClient::registryUpdated, this, [this](int n) {
         Q_UNUSED(n);
+        // Registry often finishes after history panels are drawn — upgrade cast → rpg.
+        for (const auto &nick : m_scene.nicksOnStage()) {
+            ensureRpgSpriteAsync(QString::fromStdString(nick));
+        }
         update();
+    });
+    connect(&m_rpg, &RpgActorClient::spriteReady, this, [this](const QString &nick) {
+        // Sheet may have been cached by a parallel path; apply + refresh bodies.
+        if (auto sheet = m_rpg.cachedSheetForNick(nick)) {
+            applyRpgSheet(nick, *sheet);
+            relayout();
+            update();
+        }
     });
     m_rpg.refreshRegistry();
 }
@@ -61,28 +150,21 @@ int ComicWidget::contentWidth() const
     return m_scene.contentWidthForHeight(usable) + 2 * m_margin;
 }
 
-void ComicWidget::rememberAtprotoIdentity(const QString &handleOrNick, const QString &did)
+void ComicWidget::rememberAtprotoIdentity(const QString &handleOrNick, const QString &did,
+                                          bool preloadSprite)
 {
     if (handleOrNick.isEmpty() || did.isEmpty()) {
         return;
     }
     m_rpg.rememberDidForNick(handleOrNick, did);
-    // Preload sprite for this identity (registry or live PDS).
-    ensureRpgSprite(handleOrNick);
+    if (preloadSprite) {
+        ensureRpgSpriteAsync(handleOrNick);
+    }
 }
 
-void ComicWidget::ensureRpgSprite(const QString &nick)
+void ComicWidget::applyRpgSheet(const QString &nick, const RpgSpriteSheet &sheet)
 {
-    if (nick.isEmpty() || nick == QLatin1String("?")) {
-        return;
-    }
-    if (m_scene.hasRpgSpriteForNick(nick.toStdString())) {
-        return;
-    }
-    // Full walk sheet for left/right/down facing (rpg.actor 3×4 standard).
-    // Registry first, then live PDS if not indexed yet (by handle or remembered DID).
-    auto sheet = m_rpg.spriteSheetForNick(nick, 8000);
-    if (!sheet || sheet->isNull()) {
+    if (nick.isEmpty() || sheet.isNull()) {
         return;
     }
     QString label = nick;
@@ -93,17 +175,77 @@ void ComicWidget::ensureRpgSprite(const QString &nick)
             label = ref->handle;
         }
     }
-    m_scene.setRpgSpriteForNick(nick.toStdString(), sheet->sheet, label.toStdString(),
-                                /*isSheet=*/true, sheet->columns, sheet->rows);
-    // Also index under handle if different, so bodyForNick(nick) and bodyForNick(handle) match.
+    m_scene.setRpgSpriteForNick(nick.toStdString(), sheet.sheet, label.toStdString(),
+                                /*isSheet=*/true, sheet.columns, sheet.rows);
     if (auto ref = m_rpg.lookupNick(nick)) {
         if (!ref->handle.isEmpty() &&
             ref->handle.compare(nick, Qt::CaseInsensitive) != 0) {
-            m_scene.setRpgSpriteForNick(ref->handle.toStdString(), sheet->sheet,
-                                        label.toStdString(), true, sheet->columns,
-                                        sheet->rows);
+            m_scene.setRpgSpriteForNick(ref->handle.toStdString(), sheet.sheet,
+                                        label.toStdString(), true, sheet.columns,
+                                        sheet.rows);
+            m_scene.refreshBodiesForNick(ref->handle.toStdString());
         }
     }
+    // Upgrade already-drawn panels that still show cast placeholders.
+    m_scene.refreshBodiesForNick(nick.toStdString());
+}
+
+void ComicWidget::ensureRpgSprite(const QString &nick, bool blocking)
+{
+    if (nick.isEmpty() || nick == QLatin1String("?")) {
+        return;
+    }
+    if (m_scene.hasRpgSpriteForNick(nick.toStdString())) {
+        return;
+    }
+    // Instant: already-downloaded sheet.
+    if (auto cached = m_rpg.cachedSheetForNick(nick)) {
+        applyRpgSheet(nick, *cached);
+        return;
+    }
+    if (!blocking) {
+        ensureRpgSpriteAsync(nick);
+        return;
+    }
+    // Blocking only for interactive single messages (not history join).
+    auto sheet = m_rpg.spriteSheetForNick(nick, 4000, /*allowLiveFetch=*/true);
+    if (sheet && !sheet->isNull()) {
+        applyRpgSheet(nick, *sheet);
+    }
+}
+
+void ComicWidget::ensureRpgSpriteAsync(const QString &nick)
+{
+    if (nick.isEmpty() || nick == QLatin1String("?")) {
+        return;
+    }
+    if (m_scene.hasRpgSpriteForNick(nick.toStdString())) {
+        return;
+    }
+    if (auto cached = m_rpg.cachedSheetForNick(nick)) {
+        applyRpgSheet(nick, *cached);
+        update();
+        return;
+    }
+    const QString key = nick.trimmed().toLower();
+    if (m_rpgFetchInFlight.contains(key)) {
+        return;
+    }
+    m_rpgFetchInFlight.insert(key);
+    // Off the IRC/TLS stack: nested QEventLoop is OK once processLine has returned.
+    QTimer::singleShot(0, this, [this, nick, key]() {
+        if (m_scene.hasRpgSpriteForNick(nick.toStdString())) {
+            m_rpgFetchInFlight.remove(key);
+            return;
+        }
+        auto sheet = m_rpg.spriteSheetForNick(nick, 4000, /*allowLiveFetch=*/true);
+        m_rpgFetchInFlight.remove(key);
+        if (sheet && !sheet->isNull()) {
+            applyRpgSheet(nick, *sheet);
+            update();
+            emit contentResized();
+        }
+    });
 }
 
 bool ComicWidget::looksLikeImageUrl(const QUrl &url)
@@ -173,55 +315,77 @@ void ComicWidget::fetchAndShowImage(const QUrl &url, const QString &caption, con
     if (!url.isValid()) {
         return;
     }
+    // One panel per (url, nick) — history/live can otherwise fire the same fetch
+    // multiple times and stamp the photo onto many frames.
+    const QString who = nick.isEmpty() ? QStringLiteral("you") : nick;
+    const QString flightKey =
+        url.toString(QUrl::FullyEncoded) + QLatin1Char('\n') + who.toLower();
+    if (m_imageFetchInFlight.contains(flightKey) || m_imagesShown.contains(flightKey)) {
+        return;
+    }
+    m_imageFetchInFlight.insert(flightKey);
+
     QNetworkRequest req(url);
     req.setHeader(QNetworkRequest::UserAgentHeader,
                   QStringLiteral("comic-chat-qt/0.1 (inline-media)"));
     req.setAttribute(QNetworkRequest::RedirectPolicyAttribute,
                      QNetworkRequest::NoLessSafeRedirectPolicy);
-    // Cap download size via abort after big body — simple: rely on QImage decode fail.
 
     QNetworkReply *reply = m_nam.get(req);
-    const QString who = nick;
     const QString cap = caption;
-    connect(reply, &QNetworkReply::finished, this, [this, reply, who, cap, url]() {
+    connect(reply, &QNetworkReply::finished, this, [this, reply, who, cap, url, flightKey]() {
         reply->deleteLater();
-        if (reply->error() != QNetworkReply::NoError) {
-            // Fall back to showing the URL as text so the message isn't lost.
-            ensureAssetsLoaded();
-            if (m_assetsOk) {
-                ensureRpgSprite(who);
-                const QString fallback =
-                    cap.isEmpty() ? url.toString() : (cap + QLatin1Char(' ') + url.toString());
-                m_scene.addLine(fallback.toStdString(), SM_SAY, who.toStdString());
-                relayout();
-                update();
+        m_imageFetchInFlight.remove(flightKey);
+
+        auto finishText = [&](const QString &line) {
+            if (m_imagesShown.contains(flightKey)) {
+                return;
             }
+            ensureAssetsLoaded();
+            if (!m_assetsOk) {
+                return;
+            }
+            ensureRpgSprite(who, /*blocking=*/false);
+            m_scene.addLine(line.toStdString(), SM_SAY, who.toStdString());
+            m_scene.trimToMaxPanels(kMaxComicPanels);
+            m_imagesShown.insert(flightKey);
+            while (m_imagesShown.size() > 64) {
+                m_imagesShown.erase(m_imagesShown.begin());
+            }
+            relayout();
+            update();
+        };
+
+        if (reply->error() != QNetworkReply::NoError) {
+            const QString fallback =
+                cap.isEmpty() ? url.toString() : (cap + QLatin1Char(' ') + url.toString());
+            finishText(fallback);
             return;
         }
         const QByteArray bytes = reply->readAll();
-        // Soft size cap ~12 MiB
         if (bytes.size() > 12 * 1024 * 1024) {
             return;
         }
         ComicImage img;
         if (!img.loadFromData(reinterpret_cast<const unsigned char *>(bytes.constData()),
                               bytes.size())) {
-            ensureAssetsLoaded();
-            if (m_assetsOk) {
-                ensureRpgSprite(who);
-                m_scene.addLine((cap.isEmpty() ? url.toString() : cap).toStdString(), SM_SAY,
-                                who.toStdString());
-                relayout();
-                update();
-            }
+            finishText(cap.isEmpty() ? url.toString() : cap);
+            return;
+        }
+        if (m_imagesShown.contains(flightKey)) {
             return;
         }
         ensureAssetsLoaded();
         if (!m_assetsOk) {
             return;
         }
-        ensureRpgSprite(who);
+        ensureRpgSprite(who, /*blocking=*/false);
         m_scene.addImageLine(img, cap.toStdString(), SM_SAY, who.toStdString());
+        m_scene.trimToMaxPanels(kMaxComicPanels);
+        m_imagesShown.insert(flightKey);
+        while (m_imagesShown.size() > 64) {
+            m_imagesShown.erase(m_imagesShown.begin());
+        }
         relayout();
         update();
     });
@@ -335,7 +499,7 @@ void ComicWidget::rememberIrcMessage(const QString &text, const QString &nick,
 }
 
 void ComicWidget::handlePossiblyMedia(const QString &text, const QString &nick,
-                                      const QHash<QString, QString> &tags)
+                                      const QHash<QString, QString> &tags, bool fastJoin)
 {
     ensureAssetsLoaded();
     if (!m_assetsOk) {
@@ -349,7 +513,8 @@ void ComicWidget::handlePossiblyMedia(const QString &text, const QString &nick,
     if (!accountDid.isEmpty() && accountDid.startsWith(QLatin1String("did:"))) {
         m_rpg.rememberDidForNick(who, accountDid);
     }
-    ensureRpgSprite(who);
+    // History join: never block on HTTP. Live: async upgrade (cache hit is instant).
+    ensureRpgSprite(who, /*blocking=*/false);
 
     // freeq: remember every line by msgid so later +reply can re-stage the original.
     const QString msgid = messageId(tags);
@@ -364,17 +529,17 @@ void ComicWidget::handlePossiblyMedia(const QString &text, const QString &nick,
             origNick = QStringLiteral("?");
             origText = QStringLiteral("(original not in buffer)");
         }
-        // Load sprites for both speakers before laying out bodies.
         if (origNick != QLatin1String("?")) {
-            ensureRpgSprite(origNick);
+            ensureRpgSprite(origNick, /*blocking=*/false);
         }
-        ensureRpgSprite(who);
+        ensureRpgSprite(who, /*blocking=*/false);
         m_scene.addReplyExchange(origNick.toStdString(), origText.toStdString(),
                                  who.toStdString(), text.toStdString(), SM_SAY);
+        m_scene.trimToMaxPanels(kMaxComicPanels);
         relayout();
         update();
 
-        // If reply is primarily an image, also attach media after the frame.
+        // Image replies: always fetch (async QNetworkReply — non-blocking).
         QString mediaUrl = tags.value(QStringLiteral("media-url"));
         const QString contentType = tags.value(QStringLiteral("content-type"));
         bool isImage = false;
@@ -423,39 +588,50 @@ void ComicWidget::handlePossiblyMedia(const QString &text, const QString &nick,
     }
 
     if (isImage && !mediaUrl.isEmpty()) {
+        // Always async-fetch images (join + live). QNetworkReply does not block IRC.
         QString caption = alt;
         if (caption.isEmpty()) {
             caption = stripUrls(text);
         }
-        // Don't put the raw URL in the caption
         if (caption.contains(QLatin1String("http://"), Qt::CaseInsensitive) ||
             caption.contains(QLatin1String("https://"), Qt::CaseInsensitive)) {
             caption = stripUrls(caption);
         }
+        // Ensure speaker is on stage with a temporary text panel only if no image
+        // yet — fetchAndShowImage adds the photo panel when ready. For join, still
+        // kick the download so history media appears shortly after load.
         fetchAndShowImage(QUrl(mediaUrl), caption, who);
         return;
     }
 
     // Normal text
     m_scene.addLine(text.toStdString(), SM_SAY, who.toStdString());
+    m_scene.trimToMaxPanels(kMaxComicPanels);
     relayout();
     update();
 }
 
 void ComicWidget::addChatLine(const QString &text, const QString &nick)
 {
-    handlePossiblyMedia(text, nick, {});
+    handlePossiblyMedia(text, nick, {}, false);
 }
 
 void ComicWidget::addChatLine(const QString &text, const QString &nick,
-                              const QHash<QString, QString> &tags)
+                              const QHash<QString, QString> &tags, bool fastJoin)
 {
-    handlePossiblyMedia(text, nick, tags);
+    handlePossiblyMedia(text, nick, tags, fastJoin);
 }
 
 void ComicWidget::clearPanels()
 {
     m_scene.clear();
+    relayout();
+    update();
+}
+
+void ComicWidget::trimToRecentPanels(int maxPanels)
+{
+    m_scene.trimToMaxPanels(maxPanels);
     relayout();
     update();
 }
@@ -573,6 +749,40 @@ void ComicWidget::showEvent(QShowEvent *event)
     relayout();
 }
 
+void ComicWidget::mousePressEvent(QMouseEvent *event)
+{
+    if (!event || event->button() != Qt::LeftButton) {
+        QWidget::mousePressEvent(event);
+        return;
+    }
+    for (const auto &ci : m_clickableImages) {
+        if (ci.screenRect.contains(event->pos())) {
+            ImageLightboxDialog dlg(this, ci.fullImage);
+            dlg.exec();
+            event->accept();
+            return;
+        }
+    }
+    QWidget::mousePressEvent(event);
+}
+
+void ComicWidget::mouseMoveEvent(QMouseEvent *event)
+{
+    if (!event) {
+        QWidget::mouseMoveEvent(event);
+        return;
+    }
+    bool over = false;
+    for (const auto &ci : m_clickableImages) {
+        if (ci.screenRect.contains(event->pos())) {
+            over = true;
+            break;
+        }
+    }
+    setCursor(over ? Qt::PointingHandCursor : Qt::ArrowCursor);
+    QWidget::mouseMoveEvent(event);
+}
+
 void ComicWidget::ensureAssetsLoaded()
 {
     if (m_assetsTried) {
@@ -661,6 +871,8 @@ void ComicWidget::paintEvent(QPaintEvent *event)
     Q_UNUSED(event);
     ensureAssetsLoaded();
 
+    m_clickableImages.clear();
+
     QPainter painter(this);
     painter.fillRect(rect(), QColor(0xe8, 0xe4, 0xdc));
 
@@ -670,6 +882,32 @@ void ComicWidget::paintEvent(QPaintEvent *event)
     const int statusH = 20;
     RECT dest{m_margin, m_margin, width() - m_margin, height() - m_margin - statusH};
     m_scene.draw(&canvas, dest);
+
+    // Build hit-test targets for inline image previews.
+    const int contentH = std::max(1, dest.bottom - dest.top);
+    const int side = m_scene.panelSideForHeight(contentH);
+    const int y0 = dest.top + std::max(0, (contentH - side) / 2);
+    constexpr int kGap = 14;
+    const auto &panels = m_scene.panels();
+    for (int pi = 0; pi < static_cast<int>(panels.size()); ++pi) {
+        const RECT pr{dest.left + pi * (side + kGap), y0,
+                      dest.left + pi * (side + kGap) + side, y0 + side};
+        const double sx = double(pr.right - pr.left) / m_scene.unitWidth();
+        const double sy = double(pr.bottom - pr.top) / m_scene.unitHeight();
+        for (const auto &bal : panels[pi].balloons) {
+            if (!bal.hasImage()) {
+                continue;
+            }
+            const int screenLeft = pr.left + static_cast<int>(std::lround(bal.imageBox.left * sx));
+            const int screenRight = pr.left + static_cast<int>(std::lround(bal.imageBox.right * sx));
+            const int screenTop = pr.top - static_cast<int>(std::lround(bal.imageBox.top * sy));
+            const int screenBottom =
+                pr.top - static_cast<int>(std::lround(bal.imageBox.bottom * sy));
+            const QRect r(screenLeft, screenTop, screenRight - screenLeft,
+                          screenBottom - screenTop);
+            m_clickableImages.push_back({r, bal.image.qimage()});
+        }
+    }
 
     canvas.setFont("Sans Serif", 10, false);
     canvas.setPen(CanvasColor::rgb(50, 50, 50), 1);

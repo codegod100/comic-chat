@@ -104,6 +104,8 @@ public:
     void setBackdrop(const ComicImage &backdrop);
 
     void clear();
+    // Drop oldest panels so at most maxPanels remain (comic strip window).
+    void trimToMaxPanels(int maxPanels);
 
     // Add a spoken line. Nick is mapped to a stable character from the cast.
     // If setRpgSpriteForNick() was called for this nick, that sprite is used.
@@ -127,11 +129,18 @@ public:
                              const std::string &label = {}, bool isSheet = false,
                              int columns = 3, int rows = 4);
     bool hasRpgSpriteForNick(const std::string &nick) const;
+    // After a late rpg.actor load, rebuild on-stage bodies for this nick.
+    void refreshBodiesForNick(const std::string &nick);
+    // Nicks currently drawn in any panel (for deferred sprite upgrades).
+    std::vector<std::string> nicksOnStage() const;
 
     int panelCount() const { return static_cast<int>(m_panels.size()); }
     int avatarCount() const { return static_cast<int>(m_avatars.size()); }
     int unitWidth() const { return UNIT_PANEL_W; }
     int unitHeight() const { return UNIT_PANEL_H; }
+
+    // Access laid-out panels (for hit-testing, e.g. image lightbox).
+    const std::vector<ScenePanel> &panels() const { return m_panels; }
 
     static int panelSideForHeight(int contentHeight);
     int contentWidthForHeight(int contentHeight) const;

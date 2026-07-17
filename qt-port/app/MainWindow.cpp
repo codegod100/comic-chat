@@ -5,7 +5,10 @@
 #include "app/ComicWidget.h"
 #include "net/IrcClient.h"
 
+#include <QAction>
+#include <QApplication>
 #include <QCheckBox>
+#include <QClipboard>
 #include <QComboBox>
 #include <QEvent>
 #include <QFrame>
@@ -13,10 +16,14 @@
 #include <QHash>
 #include <QHBoxLayout>
 #include <QIcon>
+#include <QKeyEvent>
 #include <QLabel>
 #include <QLineEdit>
 #include <QListWidget>
+#include <QListWidgetItem>
+#include <QMenu>
 #include <QPixmap>
+#include <QPoint>
 #include <QPushButton>
 #include <QScrollArea>
 #include <QScrollBar>
@@ -26,6 +33,13 @@
 #include <QTimer>
 #include <QVBoxLayout>
 #include <QWidget>
+
+namespace {
+// QListWidgetItem roles for freeq reply targeting.
+constexpr int kRoleMsgId = Qt::UserRole;
+constexpr int kRoleNick = Qt::UserRole + 1;
+constexpr int kRoleText = Qt::UserRole + 2;
+} // namespace
 
 MainWindow::MainWindow(QWidget *parent)
     : QMainWindow(parent)
@@ -51,6 +65,12 @@ MainWindow::MainWindow(QWidget *parent)
     connect(m_irc, &IrcClient::connected, this, &MainWindow::onIrcConnected);
     connect(m_irc, &IrcClient::disconnected, this, &MainWindow::onIrcDisconnected);
     connect(m_irc, &IrcClient::channelJoined, this, &MainWindow::onChannelJoined);
+    connect(m_irc, &IrcClient::historyBatchEnded, this, &MainWindow::onHistoryBatchEnded);
+
+    m_historyComicTimer = new QTimer(this);
+    m_historyComicTimer->setSingleShot(true);
+    m_historyComicTimer->setInterval(250);
+    connect(m_historyComicTimer, &QTimer::timeout, this, &MainWindow::flushHistoryComic);
     connect(m_irc, &IrcClient::saslSucceeded, this, [this](const QString &did) {
         appendLog(QStringLiteral("Authenticated%1")
                       .arg(did.isEmpty() ? QString() : QStringLiteral(" as %1").arg(did)));
@@ -133,16 +153,37 @@ MainWindow::MainWindow(QWidget *parent)
 
     m_log = new QListWidget(split);
     m_log->setMaximumHeight(150);
+    m_log->setContextMenuPolicy(Qt::CustomContextMenu);
+    m_log->setToolTip(QStringLiteral("Right-click a chat line to reply (freeq +reply)"));
+    connect(m_log, &QListWidget::customContextMenuRequested, this,
+            &MainWindow::onLogContextMenu);
     m_log->addItem(QStringLiteral(
-        "Login with Bluesky (freeq broker), then Connect — or chat offline."));
+        "Login with Bluesky (freeq broker), then Connect — or chat offline. "
+        "Right-click messages to reply."));
     split->addWidget(m_comicScroll);
     split->addWidget(m_log);
     split->setStretchFactor(0, 5);
     split->setStretchFactor(1, 1);
 
+    // freeq reply draft banner (hidden until right-click → Reply).
+    m_replyBanner = new QWidget(central);
+    auto *replyRow = new QHBoxLayout(m_replyBanner);
+    replyRow->setContentsMargins(0, 0, 0, 0);
+    m_replyLabel = new QLabel(m_replyBanner);
+    m_replyLabel->setTextInteractionFlags(Qt::TextSelectableByMouse);
+    m_replyLabel->setStyleSheet(
+        QStringLiteral("QLabel { color: #1a4a8a; background: #e8f2ff; padding: 4px 8px; "
+                       "border-radius: 4px; }"));
+    m_cancelReplyBtn = new QPushButton(QStringLiteral("Cancel reply"), m_replyBanner);
+    connect(m_cancelReplyBtn, &QPushButton::clicked, this, &MainWindow::onCancelReply);
+    replyRow->addWidget(m_replyLabel, 1);
+    replyRow->addWidget(m_cancelReplyBtn);
+    m_replyBanner->setVisible(false);
+
     auto *row = new QHBoxLayout;
     m_say = new QLineEdit(central);
     m_say->setPlaceholderText(QStringLiteral("Say something… (Enter)"));
+    m_say->installEventFilter(this);
     connect(m_say, &QLineEdit::returnPressed, this, &MainWindow::onSay);
 
     m_room = new QComboBox(central);
@@ -167,6 +208,7 @@ MainWindow::MainWindow(QWidget *parent)
     layout->addWidget(authBox);
     layout->addWidget(ircBox);
     layout->addWidget(split, 1);
+    layout->addWidget(m_replyBanner);
     layout->addLayout(row);
     setCentralWidget(central);
 
@@ -254,6 +296,13 @@ bool MainWindow::eventFilter(QObject *watched, QEvent *event)
     if (watched == m_comicScroll->viewport() && event->type() == QEvent::Resize) {
         syncComicSize();
     }
+    if (watched == m_say && event->type() == QEvent::KeyPress) {
+        auto *ke = static_cast<QKeyEvent *>(event);
+        if (ke->key() == Qt::Key_Escape && !m_replyMsgId.isEmpty()) {
+            onCancelReply();
+            return true;
+        }
+    }
     return QMainWindow::eventFilter(watched, event);
 }
 
@@ -282,6 +331,105 @@ void MainWindow::appendLog(const QString &line)
 {
     m_log->addItem(line);
     m_log->scrollToBottom();
+}
+
+void MainWindow::appendChatLog(const QString &displayLine, const QString &nick,
+                               const QString &text, const QString &msgid)
+{
+    auto *item = new QListWidgetItem(displayLine);
+    if (!msgid.isEmpty()) {
+        item->setData(kRoleMsgId, msgid);
+        item->setData(kRoleNick, nick);
+        item->setData(kRoleText, text);
+        item->setToolTip(QStringLiteral("Right-click to reply · msgid %1").arg(msgid));
+    }
+    m_log->addItem(item);
+    m_log->scrollToBottom();
+}
+
+void MainWindow::setReplyTarget(const QString &msgid, const QString &nick, const QString &text)
+{
+    m_replyMsgId = msgid.trimmed();
+    m_replyNick = nick;
+    m_replyText = text;
+    updateReplyBanner();
+    if (m_say) {
+        m_say->setFocus();
+        m_say->setPlaceholderText(QStringLiteral("Reply to %1… (Enter · Esc cancel)")
+                                      .arg(nick.isEmpty() ? QStringLiteral("message") : nick));
+    }
+    statusBar()->showMessage(QStringLiteral("Replying to %1").arg(nick), 4000);
+}
+
+void MainWindow::clearReplyTarget()
+{
+    m_replyMsgId.clear();
+    m_replyNick.clear();
+    m_replyText.clear();
+    updateReplyBanner();
+    if (m_say) {
+        m_say->setPlaceholderText(QStringLiteral("Say something… (Enter)"));
+    }
+}
+
+void MainWindow::updateReplyBanner()
+{
+    if (!m_replyBanner || !m_replyLabel) {
+        return;
+    }
+    if (m_replyMsgId.isEmpty()) {
+        m_replyBanner->setVisible(false);
+        return;
+    }
+    QString snippet = m_replyText;
+    if (snippet.size() > 80) {
+        snippet = snippet.left(77) + QStringLiteral("…");
+    }
+    snippet.replace(QLatin1Char('\n'), QLatin1Char(' '));
+    m_replyLabel->setText(QStringLiteral("↩ Replying to %1: “%2”")
+                              .arg(m_replyNick.isEmpty() ? QStringLiteral("?") : m_replyNick,
+                                   snippet));
+    m_replyBanner->setVisible(true);
+}
+
+void MainWindow::onCancelReply()
+{
+    clearReplyTarget();
+    statusBar()->showMessage(QStringLiteral("Reply cancelled"), 2000);
+}
+
+void MainWindow::onLogContextMenu(const QPoint &pos)
+{
+    if (!m_log) {
+        return;
+    }
+    QListWidgetItem *item = m_log->itemAt(pos);
+    if (!item) {
+        return;
+    }
+    const QString msgid = item->data(kRoleMsgId).toString();
+    const QString nick = item->data(kRoleNick).toString();
+    const QString text = item->data(kRoleText).toString();
+
+    QMenu menu(this);
+    QAction *replyAct = menu.addAction(QStringLiteral("Reply"));
+    replyAct->setEnabled(!msgid.isEmpty() && m_irc && m_irc->isConnected());
+    if (msgid.isEmpty()) {
+        replyAct->setText(QStringLiteral("Reply (no msgid)"));
+    } else if (!m_irc || !m_irc->isConnected()) {
+        replyAct->setText(QStringLiteral("Reply (not connected)"));
+    }
+    QAction *copyAct = menu.addAction(QStringLiteral("Copy text"));
+    QAction *chosen = menu.exec(m_log->mapToGlobal(pos));
+    if (chosen == replyAct && !msgid.isEmpty()) {
+        setReplyTarget(msgid, nick, text.isEmpty() ? item->text() : text);
+    } else if (chosen == copyAct) {
+        const QString t = text.isEmpty() ? item->text() : text;
+        if (QClipboard *cb = QApplication::clipboard()) {
+            cb->setText(t);
+        }
+        statusBar()->showMessage(QStringLiteral("Copied"), 1500);
+    }
 }
 
 void MainWindow::updateAuthUi()
@@ -479,14 +627,38 @@ void MainWindow::onSay()
         who = QStringLiteral("you");
     }
 
+    const QString replyId = m_replyMsgId;
+    const QString replyNick = m_replyNick;
+    const QString replyText = m_replyText;
+
     if (m_irc->isConnected()) {
         // Bind server msgid from echo-message so replies to us resolve.
         m_comic->noteOutgoingMessage(text, who);
-        m_irc->sendChannelMessage(text);
+        if (!replyId.isEmpty()) {
+            m_irc->sendChannelReply(replyId, text);
+        } else {
+            m_irc->sendChannelMessage(text);
+        }
     }
 
-    appendLog(QStringLiteral("%1: %2").arg(who, text));
-    m_comic->addChatLine(text, who);
+    if (!replyId.isEmpty()) {
+        // Optimistic local reply frame (echo with +reply will also try; we
+        // clear the draft so echo can still decorate if needed).
+        appendLog(QStringLiteral("  ↩ %1: %2")
+                      .arg(replyNick.isEmpty() ? QStringLiteral("?") : replyNick,
+                           replyText));
+        appendChatLog(QStringLiteral("%1 (reply): %2").arg(who, text), who, text,
+                      /*msgid=*/QString());
+        QHash<QString, QString> fakeTags;
+        fakeTags.insert(QStringLiteral("+reply"), replyId);
+        // Cache parent is already present; ensureRpg uses who.
+        m_comic->addChatLine(text, who, fakeTags);
+        clearReplyTarget();
+    } else {
+        appendChatLog(QStringLiteral("%1: %2").arg(who, text), who, text, QString());
+        m_comic->addChatLine(text, who);
+    }
+    m_comic->trimToRecentPanels(kMaxComicHistory);
     m_say->clear();
     statusBar()->showMessage(m_comic->statusLine(), 4000);
     QTimer::singleShot(0, this, &MainWindow::syncComicSize);
@@ -494,20 +666,82 @@ void MainWindow::onSay()
 
 void MainWindow::onChannelJoined(const QString &channel)
 {
-    appendLog(QStringLiteral("Joined %1 — caching recent history for replies…").arg(channel));
-    m_joiningHistory = true;
-    // freeq join-replay + CHATHISTORY usually finish within a second or two.
-    QTimer::singleShot(4000, this, [this]() { m_joiningHistory = false; });
+    appendLog(QStringLiteral("Joined %1 — loading history…").arg(channel));
+    m_historyComicQueue.clear();
+    m_historyComicTotal = 0;
+}
+
+void MainWindow::onHistoryBatchEnded()
+{
+    // Defer out of IrcClient::processLine so flush isn't re-entrant under TLS read.
+    QTimer::singleShot(0, this, &MainWindow::flushHistoryComic);
+}
+
+void MainWindow::flushHistoryComic()
+{
+    if (m_flushingHistoryComic || !m_comic || m_historyComicQueue.isEmpty()) {
+        return;
+    }
+    m_flushingHistoryComic = true;
+    // Take ownership so nested event loops (rpg.actor HTTP) can't mutate mid-walk.
+    const QList<HistoryComicLine> queue = std::move(m_historyComicQueue);
+    m_historyComicQueue.clear();
+
+    if (m_log) {
+        m_log->setUpdatesEnabled(true);
+        m_log->scrollToBottom();
+    }
+
+    // Comic strip: only the last N history messages (log already has the full set).
+    // fastJoin=true: no blocking sprite/media HTTP — panels appear immediately.
+    const int n = queue.size();
+    const int total = std::max(m_historyComicTotal, n);
+    m_historyComicTotal = 0;
+    appendLog(QStringLiteral("Comic strip: showing last %1 of %2 history messages")
+                  .arg(n)
+                  .arg(total));
+    for (int i = 0; i < n; ++i) {
+        const HistoryComicLine &h = queue.at(i);
+        m_comic->addChatLine(h.text, h.nick, h.tags, /*fastJoin=*/true);
+    }
+    m_comic->trimToRecentPanels(kMaxComicHistory);
+
+    // Async rpg.actor upgrade for unique speakers (after UI is responsive).
+    // Also include DIDs from account tags so live fetch can resolve by DID.
+    QSet<QString> nicks;
+    for (int i = 0; i < n; ++i) {
+        const HistoryComicLine &h = queue.at(i);
+        nicks.insert(h.nick);
+        const QString did = h.tags.value(QStringLiteral("account"));
+        if (!did.isEmpty() && did.startsWith(QLatin1String("did:"))) {
+            nicks.insert(did);
+            if (m_comic) {
+                m_comic->rememberAtprotoIdentity(h.nick, did, /*preloadSprite=*/false);
+            }
+        }
+    }
+    int delay = 0;
+    for (const QString &nick : nicks) {
+        QTimer::singleShot(delay, this, [this, nick]() {
+            if (m_comic) {
+                m_comic->ensureRpgSpriteAsync(nick);
+            }
+        });
+        delay += 40; // stagger so we don't spike the network all at once
+    }
+
+    m_flushingHistoryComic = false;
+    QTimer::singleShot(0, this, &MainWindow::syncComicSize);
 }
 
 void MainWindow::onIrcMessage(const QString &nick, const QString &text,
                               const QHash<QString, QString> &tags, bool history)
 {
-    const bool hist = history || m_joiningHistory;
     const QString replyTo = tags.value(QStringLiteral("+reply")).isEmpty()
                                 ? tags.value(QStringLiteral("reply"))
                                 : tags.value(QStringLiteral("+reply"));
     const bool isReply = !replyTo.isEmpty();
+    const QString msgid = tags.value(QStringLiteral("msgid"));
 
     auto appendReplyLog = [&](const QString &speaker) {
         QString origNick;
@@ -515,61 +749,94 @@ void MainWindow::onIrcMessage(const QString &nick, const QString &text,
         const bool haveParent =
             m_comic && m_comic->lookupCachedMessage(replyTo, &origNick, &origText);
         if (haveParent) {
-            appendLog(QStringLiteral("  ↩ %1: %2").arg(origNick, origText));
+            // Parent line is right-clickable (reply to original).
+            appendChatLog(QStringLiteral("  ↩ %1: %2").arg(origNick, origText), origNick,
+                          origText, replyTo);
         } else {
             appendLog(QStringLiteral("  ↩ (original not in buffer)"));
         }
-        appendLog(QStringLiteral("%1 (reply): %2").arg(speaker, text));
+        appendChatLog(QStringLiteral("%1 (reply): %2").arg(speaker, text), speaker, text,
+                      msgid);
     };
 
-    // freeq echo-message / join-history: always cache msgid → text for +reply.
-    if (m_irc && nick.compare(m_irc->nick(), Qt::CaseInsensitive) == 0) {
-        if (m_comic) {
-            m_comic->rememberIrcMessage(text, nick, tags);
-            // Bind DID from account-tag for our own echoes too.
-            const QString did = tags.value(QStringLiteral("account"));
-            if (!did.isEmpty() && did.startsWith(QLatin1String("did:"))) {
-                m_comic->rememberAtprotoIdentity(nick, did);
+    auto bindAccountDid = [&](bool preloadSprite) {
+        if (!m_comic) {
+            return;
+        }
+        m_comic->rememberIrcMessage(text, nick, tags);
+        const QString did = tags.value(QStringLiteral("account"));
+        if (!did.isEmpty() && did.startsWith(QLatin1String("did:"))) {
+            // History: never kick off per-line sprite fetches (join was very slow).
+            m_comic->rememberAtprotoIdentity(nick, did, /*preloadSprite=*/preloadSprite);
+        }
+    };
+
+    // Live echo of our own PRIVMSG (not history): don't re-draw — onSay already
+    // did. Stamp msgid onto the last log line so right-click reply works.
+    if (!history && m_irc && nick.compare(m_irc->nick(), Qt::CaseInsensitive) == 0) {
+        bindAccountDid(/*preloadSprite=*/true);
+        if (isReply) {
+            if (!msgid.isEmpty() && m_log && m_log->count() > 0) {
+                QListWidgetItem *last = m_log->item(m_log->count() - 1);
+                if (last && last->data(kRoleMsgId).toString().isEmpty() &&
+                    last->text().contains(QStringLiteral("(reply)"))) {
+                    last->setData(kRoleMsgId, msgid);
+                    last->setData(kRoleNick, nick);
+                    last->setData(kRoleText, text);
+                    last->setToolTip(
+                        QStringLiteral("Right-click to reply · msgid %1").arg(msgid));
+                }
+            }
+            return;
+        }
+        if (!msgid.isEmpty() && m_log && m_log->count() > 0) {
+            QListWidgetItem *last = m_log->item(m_log->count() - 1);
+            if (last && last->data(kRoleMsgId).toString().isEmpty()) {
+                last->setData(kRoleMsgId, msgid);
+                last->setData(kRoleNick, nick);
+                last->setData(kRoleText, text);
+                last->setToolTip(
+                    QStringLiteral("Right-click to reply · msgid %1").arg(msgid));
             }
         }
-        if (hist) {
-            appendLog(QStringLiteral("(history/self) %1: %2").arg(nick, text));
-            return;
-        }
-        // Self reply echo: local onSay already drew a plain panel; still draw the
-        // reply frame (original + reply) and log both lines.
-        if (isReply && m_comic) {
-            appendReplyLog(nick);
-            m_comic->addChatLine(text, nick, tags);
-            statusBar()->showMessage(m_comic->statusLine(), 4000);
-            QTimer::singleShot(0, this, &MainWindow::syncComicSize);
-            return;
-        }
-        appendLog(QStringLiteral("(echo) %1: %2").arg(nick, text));
         return;
     }
 
-    // Join-replay / CHATHISTORY: fill parent cache only (don't flood the strip).
-    if (hist) {
-        if (m_comic) {
-            m_comic->rememberIrcMessage(text, nick, tags);
-            const QString did = tags.value(QStringLiteral("account"));
-            if (!did.isEmpty() && did.startsWith(QLatin1String("did:"))) {
-                m_comic->rememberAtprotoIdentity(nick, did);
-            }
-        }
-        return;
+    // Cache + identity for every line (history and live).
+    bindAccountDid(/*preloadSprite=*/!history);
+
+    // Batch log widget updates during history flood (huge win on join).
+    if (history && m_log && m_log->updatesEnabled()) {
+        m_log->setUpdatesEnabled(false);
     }
 
     const QString mediaUrl = tags.value(QStringLiteral("media-url"));
     if (isReply) {
         appendReplyLog(nick);
     } else if (!mediaUrl.isEmpty()) {
-        appendLog(QStringLiteral("%1: [image] %2").arg(nick, mediaUrl));
+        appendChatLog(QStringLiteral("%1: [image] %2").arg(nick, mediaUrl), nick, text,
+                      msgid);
     } else {
-        appendLog(QStringLiteral("%1: %2").arg(nick, text));
+        appendChatLog(QStringLiteral("%1: %2").arg(nick, text), nick, text, msgid);
     }
-    m_comic->addChatLine(text, nick, tags);
+
+    // History: full log above; comic only gets last kMaxComicHistory (flush at batch end).
+    if (history) {
+        ++m_historyComicTotal;
+        m_historyComicQueue.append(HistoryComicLine{nick, text, tags});
+        // Only need the last N for the strip — drop older queued lines early.
+        while (m_historyComicQueue.size() > kMaxComicHistory) {
+            m_historyComicQueue.removeFirst();
+        }
+        if (m_historyComicTimer) {
+            m_historyComicTimer->start(); // debounce if no BATCH trailer
+        }
+        return;
+    }
+
+    // Live traffic → comic strip (auto-trimmed to last N panels).
+    m_comic->addChatLine(text, nick, tags, /*fastJoin=*/false);
+    m_comic->trimToRecentPanels(kMaxComicHistory);
     statusBar()->showMessage(m_comic->statusLine(), 4000);
     QTimer::singleShot(0, this, &MainWindow::syncComicSize);
 }
@@ -596,5 +863,6 @@ void MainWindow::onIrcConnected()
 void MainWindow::onIrcDisconnected()
 {
     setConnectedUi(false);
+    clearReplyTarget();
     appendLog(QStringLiteral("IRC disconnected."));
 }

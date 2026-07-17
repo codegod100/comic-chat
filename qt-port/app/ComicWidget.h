@@ -7,9 +7,12 @@
 #include "net/RpgActorClient.h"
 
 #include <QHash>
+#include <QImage>
 #include <QList>
 #include <QNetworkAccessManager>
 #include <QPixmap>
+#include <QRect>
+#include <QSet>
 #include <QString>
 #include <QStringList>
 #include <QWidget>
@@ -22,8 +25,9 @@ public:
     void addChatLine(const QString &text, const QString &nick = QStringLiteral("you"));
     // IRCv3 / freeq media: tags may include media-url, content-type, media-alt,
     // msgid, +reply (threaded reply — new panel with original + reply).
+    // fastJoin: skip blocking rpg.actor network (history flush); sprites upgrade async.
     void addChatLine(const QString &text, const QString &nick,
-                     const QHash<QString, QString> &tags);
+                     const QHash<QString, QString> &tags, bool fastJoin = false);
     // Cache only (self echo / join history) — no new comic panel.
     void rememberIrcMessage(const QString &text, const QString &nick,
                             const QHash<QString, QString> &tags);
@@ -34,10 +38,17 @@ public:
     bool lookupCachedMessage(const QString &msgid, QString *nickOut,
                              QString *textOut) const;
     void clearPanels();
+    // Keep only the newest N panels in the strip (default 10).
+    void trimToRecentPanels(int maxPanels = kMaxComicPanels);
+    int maxComicPanels() const { return kMaxComicPanels; }
     QString statusLine() const;
 
     // freeq/ATProto: remember DID for a nick so rpg.actor can resolve by DID.
-    void rememberAtprotoIdentity(const QString &handleOrNick, const QString &did);
+    // preloadSprite=false during history flood (avoids nested HTTP under IRC).
+    void rememberAtprotoIdentity(const QString &handleOrNick, const QString &did,
+                                 bool preloadSprite = true);
+    // Non-blocking: apply cache hit now; network fetch finishes later + repaint.
+    void ensureRpgSpriteAsync(const QString &nick);
 
     // Room / backdrop (base names from comicart/backdrop/*.bmp).
     QStringList availableRooms() const;
@@ -58,18 +69,22 @@ signals:
 
 protected:
     void paintEvent(QPaintEvent *event) override;
+    void mousePressEvent(QMouseEvent *event) override;
+    void mouseMoveEvent(QMouseEvent *event) override;
     void showEvent(QShowEvent *event) override;
 
 private:
     void ensureAssetsLoaded();
-    void ensureRpgSprite(const QString &nick);
+    // blocking=false: cache only + schedule network; true: may nested-loop HTTP.
+    void ensureRpgSprite(const QString &nick, bool blocking = false);
+    void applyRpgSheet(const QString &nick, const RpgSpriteSheet &sheet);
     void relayout();
     int contentHeight() const;
     int contentWidth() const;
 
     // Detect image URL from freeq tags or plain text; start download if needed.
     void handlePossiblyMedia(const QString &text, const QString &nick,
-                             const QHash<QString, QString> &tags);
+                             const QHash<QString, QString> &tags, bool fastJoin = false);
     void fetchAndShowImage(const QUrl &url, const QString &caption, const QString &nick);
     void cacheMessage(const QString &msgid, const QString &nick, const QString &text);
     // freeq: +reply / draft/reply → parent msgid.
@@ -96,7 +111,12 @@ private:
         QString text;
     };
     QList<PendingOut> m_pendingOut;
+    QSet<QString> m_rpgFetchInFlight; // nick keys with async fetch pending
+    QSet<QString> m_imageFetchInFlight; // url|nick — avoid duplicate panels
+    QSet<QString> m_imagesShown;        // already added to strip
     static constexpr int kMaxCachedMsgs = 500;
+    // Comic strip only shows a short recent window (log keeps full history).
+    static constexpr int kMaxComicPanels = 10;
     bool m_assetsTried = false;
     bool m_assetsOk = false;
     QString m_loadError;
@@ -104,4 +124,11 @@ private:
     QString m_roomName = QStringLiteral("room8bs");
     int m_margin = 12;
     int m_viewportH = 400;
+
+    // Hit-test targets for inline image previews rebuilt each paintEvent.
+    struct ClickableImage {
+        QRect screenRect;
+        QImage fullImage;
+    };
+    std::vector<ClickableImage> m_clickableImages;
 };
