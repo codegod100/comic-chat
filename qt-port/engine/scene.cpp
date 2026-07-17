@@ -52,6 +52,17 @@ void ComicScene::setArt(const LoadedAvatar &avatar, const ComicImage &backdrop)
     setArt(std::move(one), backdrop);
 }
 
+void ComicScene::setBackdrop(const ComicImage &backdrop)
+{
+    m_backdrop = backdrop;
+    m_hasArt = !m_backdrop.isNull() && !m_avatars.empty();
+    if (m_hasArt) {
+        m_status = "Cast: " + std::to_string(m_avatars.size()) + " characters";
+    } else if (m_backdrop.isNull()) {
+        m_status = "No backdrop";
+    }
+}
+
 void ComicScene::clear()
 {
     m_panels.clear();
@@ -775,6 +786,70 @@ void ComicScene::addImageLine(const ComicImage &image, const std::string &captio
                " speakers, " + std::to_string(m_avatars.size()) + " cast)";
 }
 
+void ComicScene::addReplyExchange(const std::string &origNick, const std::string &origText,
+                                  const std::string &replyNick, const std::string &replyText,
+                                  UCHAR replyMode)
+{
+    if (replyText.empty() && origText.empty()) {
+        return;
+    }
+    if (m_avatars.empty() && m_nickRpgSprites.empty()) {
+        return;
+    }
+    if (m_layoutPxPerTwip <= 0.0) {
+        m_layoutPxPerTwip = 720.0 / UNIT_PANEL_W;
+    }
+
+    const std::string whoReply = replyNick.empty() ? "you" : replyNick;
+    const std::string whoOrig = origNick.empty() ? "?" : origNick;
+
+    // Always a dedicated panel (freeq ReplyBadge context = new comic frame).
+    ScenePanel panel;
+    panel.seed = static_cast<unsigned>(m_panels.size() + 1);
+
+    auto pushBody = [&](const std::string &nick) {
+        if (findBodyIndex(panel, nick) >= 0) {
+            return;
+        }
+        SceneBody b = bodyForNick(nick);
+        if (b.type == AT_CUSTOM || b.type == AT_SIMPLE || b.type == AT_COMPLEX) {
+            panel.bodies.push_back(std::move(b));
+        }
+    };
+
+    // Original first (left), then reply — classic two-shot conversation.
+    if (!origText.empty()) {
+        pushBody(whoOrig);
+    }
+    pushBody(whoReply);
+
+    if (panel.bodies.empty()) {
+        return;
+    }
+
+    if (!origText.empty()) {
+        SceneBalloon orig;
+        // Parent is plain speech context; reply balloon is marked SM_REPLY.
+        orig.text = origText;
+        orig.nick = whoOrig;
+        orig.mode = SM_SAY;
+        panel.balloons.push_back(std::move(orig));
+    }
+
+    SceneBalloon rep;
+    rep.text = replyText.empty() ? "(…)" : replyText;
+    rep.nick = whoReply;
+    (void)replyMode;
+    rep.mode = SM_REPLY; // mark reply bubble (not the original)
+    panel.balloons.push_back(std::move(rep));
+
+    layoutPanel(panel);
+    m_panels.push_back(std::move(panel));
+
+    m_status = "Panels: " + std::to_string(m_panels.size()) + " | reply frame " + whoOrig +
+               " → " + whoReply;
+}
+
 void ComicScene::drawBody(ICanvas *canvas, const SceneBody &body) const
 {
     auto drawPoseBox = [&](CPose *pose, const RECT &r) {
@@ -854,17 +929,49 @@ void ComicScene::drawBalloon(ICanvas *canvas, const SceneBalloon &b) const
     const int mx = (L + R) / 2;
     const int my = (T + Btm) / 2;
     const int lineH = logicalLineHeight(m_fontPoint, m_layoutPxPerTwip);
+    const UCHAR mode = b.mode;
+
+    // Style from classic Comic Chat balloon kinds (+ SM_REPLY for freeq threads).
+    CanvasColor fill = CanvasColor::rgb(255, 255, 255);
+    CanvasColor stroke = CanvasColor::rgb(0, 0, 0);
+    int strokeW = 36;
+    bool thoughtTail = false;
+    bool boxShape = false;
+    bool jagged = false;
+    if (mode == SM_WHISPER) {
+        fill = CanvasColor::rgb(248, 248, 252);
+        stroke = CanvasColor::rgb(90, 90, 110);
+        strokeW = 28;
+    } else if (mode == SM_THINK) {
+        fill = CanvasColor::rgb(255, 255, 255);
+        stroke = CanvasColor::rgb(40, 40, 50);
+        strokeW = 32;
+        thoughtTail = true;
+    } else if (mode == SM_ACTION) {
+        fill = CanvasColor::rgb(255, 252, 230);
+        stroke = CanvasColor::rgb(30, 30, 30);
+        strokeW = 40;
+        boxShape = true;
+    } else if (mode == SM_SHOUT) {
+        fill = CanvasColor::rgb(255, 250, 240);
+        stroke = CanvasColor::rgb(0, 0, 0);
+        strokeW = 56;
+        jagged = true;
+    } else if (mode == SM_REPLY) {
+        // Soft blue “reply” speech bubble — mark the reply, not the original.
+        fill = CanvasColor::rgb(232, 242, 255);
+        stroke = CanvasColor::rgb(40, 90, 170);
+        strokeW = 40;
+    }
 
     if (b.hasImage()) {
-        // Photo frame: white card + black border + image + optional caption.
         RECT frame{L, T, R, Btm};
-        canvas->setBrush(CanvasColor::rgb(255, 255, 255));
-        canvas->setPen(CanvasColor::rgb(20, 20, 20), 40);
+        canvas->setBrush(fill);
+        canvas->setPen(stroke, strokeW);
         canvas->fillRect(frame);
         canvas->drawRect(frame);
 
-        // Tail pointing at speaker
-        canvas->setBrush(CanvasColor::rgb(255, 255, 255));
+        canvas->setBrush(fill);
         canvas->beginPath();
         canvas->moveTo(mx - 100, Btm);
         canvas->lineTo(b.speakerArrowX, b.speakerTop + 120);
@@ -875,7 +982,6 @@ void ComicScene::drawBalloon(ICanvas *canvas, const SceneBalloon &b) const
         const int iw = b.imageBox.right - b.imageBox.left;
         const int ih = b.imageBox.top - b.imageBox.bottom;
         if (iw > 0 && ih > 0 && !b.image.isNull()) {
-            // Thin inner border
             RECT ir = b.imageBox;
             ir.left -= 20;
             ir.right += 20;
@@ -887,14 +993,16 @@ void ComicScene::drawBalloon(ICanvas *canvas, const SceneBalloon &b) const
             b.image.draw(canvas, b.imageBox.left, b.imageBox.bottom, iw, ih);
         }
 
-        // Nick + caption under photo
         canvas->setFont("Sans Serif", m_fontPoint, false);
         canvas->setPen(CanvasColor::rgb(0, 0, 0), 1);
         int y = b.imageBox.bottom - lineH;
         if (!b.nick.empty()) {
             canvas->setFont("Sans Serif", std::max(8, m_fontPoint - 1), true);
-            canvas->setPen(CanvasColor::rgb(40, 40, 120), 1);
-            const std::string label = b.nick + ":";
+            canvas->setPen(mode == SM_REPLY ? CanvasColor::rgb(30, 80, 160)
+                                            : CanvasColor::rgb(40, 40, 120),
+                           1);
+            const std::string label =
+                (mode == SM_REPLY ? std::string("\xE2\x86\xA9 ") : std::string()) + b.nick + ":";
             const int lw = measureLogical(label);
             canvas->drawText((b.textBox.left + b.textBox.right - lw) / 2, y, label);
             canvas->setFont("Sans Serif", m_fontPoint, false);
@@ -909,37 +1017,96 @@ void ComicScene::drawBalloon(ICanvas *canvas, const SceneBalloon &b) const
         return;
     }
 
-    // Cloud speech balloon
-    const int dx = (R - L) / 4;
-    POINT cps[8] = {
-        {L, my}, {L + dx / 2, T}, {mx, T}, {R - dx / 2, T},
-        {R, my}, {R - dx / 2, Btm}, {mx, Btm}, {L + dx / 2, Btm},
-    };
-    CCardinal spline(cps, 8, TRUE);
+    canvas->setBrush(fill);
+    canvas->setPen(stroke, strokeW);
 
-    canvas->setBrush(CanvasColor::rgb(255, 255, 255));
-    canvas->setPen(CanvasColor::rgb(0, 0, 0), 36);
-    canvas->beginPath();
-    POINT lo = spline.SegLo();
-    canvas->moveTo(lo.x, lo.y);
-    spline.Draw(canvas);
-    canvas->closePath();
-    canvas->strokeAndFill();
+    if (boxShape) {
+        // Action / narrative box (classic CBWoodringBox).
+        RECT box{L, T, R, Btm};
+        canvas->fillRect(box);
+        canvas->drawRect(box);
+    } else if (jagged) {
+        // Shout: simple star-ish / pointed outline.
+        const int midY = my;
+        const int midX = mx;
+        const int inset = std::max(40, (R - L) / 12);
+        canvas->beginPath();
+        canvas->moveTo(L + inset, T);
+        canvas->lineTo(midX, T + inset / 2);
+        canvas->lineTo(R - inset, T);
+        canvas->lineTo(R, midY);
+        canvas->lineTo(R - inset, Btm);
+        canvas->lineTo(midX, Btm - inset / 2);
+        canvas->lineTo(L + inset, Btm);
+        canvas->lineTo(L, midY);
+        canvas->closePath();
+        canvas->strokeAndFill();
+        // Pointy tail
+        canvas->beginPath();
+        canvas->moveTo(mx - 120, Btm);
+        canvas->lineTo(b.speakerArrowX, b.speakerTop + 120);
+        canvas->lineTo(mx + 120, Btm);
+        canvas->closePath();
+        canvas->strokeAndFill();
+    } else {
+        // Cloud speech / think / whisper / reply
+        const int dx = (R - L) / 4;
+        POINT cps[8] = {
+            {L, my}, {L + dx / 2, T}, {mx, T}, {R - dx / 2, T},
+            {R, my}, {R - dx / 2, Btm}, {mx, Btm}, {L + dx / 2, Btm},
+        };
+        CCardinal spline(cps, 8, TRUE);
+        canvas->beginPath();
+        POINT lo = spline.SegLo();
+        canvas->moveTo(lo.x, lo.y);
+        spline.Draw(canvas);
+        canvas->closePath();
+        canvas->strokeAndFill();
 
-    canvas->beginPath();
-    canvas->moveTo(mx - 100, Btm);
-    canvas->lineTo(b.speakerArrowX, b.speakerTop + 120);
-    canvas->lineTo(mx + 100, Btm);
-    canvas->closePath();
-    canvas->strokeAndFill();
+        if (thoughtTail) {
+            // Thought: two circles stepping toward the speaker.
+            const int ax = b.speakerArrowX;
+            const int ay = b.speakerTop + 80;
+            const int x1 = (mx * 2 + ax) / 3;
+            const int y1 = (Btm * 2 + ay) / 3;
+            const int x2 = (mx + ax * 2) / 3;
+            const int y2 = (Btm + ay * 2) / 3;
+            const int r1 = 70;
+            const int r2 = 45;
+            canvas->setBrush(fill);
+            canvas->setPen(stroke, strokeW * 3 / 4);
+            canvas->fillEllipse(RECT{x1 - r1, y1 + r1, x1 + r1, y1 - r1});
+            canvas->drawEllipse(RECT{x1 - r1, y1 + r1, x1 + r1, y1 - r1});
+            canvas->fillEllipse(RECT{x2 - r2, y2 + r2, x2 + r2, y2 - r2});
+            canvas->drawEllipse(RECT{x2 - r2, y2 + r2, x2 + r2, y2 - r2});
+        } else {
+            // Speech tail
+            canvas->setBrush(fill);
+            canvas->setPen(stroke, strokeW);
+            canvas->beginPath();
+            canvas->moveTo(mx - 100, Btm);
+            canvas->lineTo(b.speakerArrowX, b.speakerTop + 120);
+            canvas->lineTo(mx + 100, Btm);
+            canvas->closePath();
+            canvas->strokeAndFill();
+        }
+    }
 
     canvas->setFont("Sans Serif", m_fontPoint, false);
     canvas->setPen(CanvasColor::rgb(0, 0, 0), 1);
     int y = b.textBox.top - lineH * 85 / 100;
     if (!b.nick.empty()) {
         canvas->setFont("Sans Serif", std::max(8, m_fontPoint - 1), true);
-        canvas->setPen(CanvasColor::rgb(40, 40, 120), 1);
-        const std::string label = b.nick + ":";
+        if (mode == SM_REPLY) {
+            canvas->setPen(CanvasColor::rgb(30, 80, 160), 1);
+        } else if (mode == SM_WHISPER) {
+            canvas->setPen(CanvasColor::rgb(80, 80, 100), 1);
+        } else {
+            canvas->setPen(CanvasColor::rgb(40, 40, 120), 1);
+        }
+        // ↩ marks the *reply* speaker label (classic had no reply mode).
+        const std::string label =
+            (mode == SM_REPLY ? std::string("\xE2\x86\xA9 ") : std::string()) + b.nick + ":";
         const int lw = measureLogical(label);
         canvas->drawText((b.textBox.left + b.textBox.right - lw) / 2, y, label);
         canvas->setFont("Sans Serif", m_fontPoint, false);
@@ -1029,18 +1196,25 @@ void ComicScene::draw(ICanvas *canvas, const RECT &dest) const
     }
 
     if (m_panels.empty()) {
+        // Preview the selected room so changing the combo is immediately visible.
         RECT empty{dest.left, y0, dest.left + panelW, y0 + panelH};
-        canvas->setBrush(CanvasColor::rgb(255, 255, 255));
-        canvas->setPen(CanvasColor::rgb(40, 40, 40), 2);
-        canvas->fillRect(empty);
-        canvas->drawRect(empty);
-        canvas->setFont("Sans Serif", 12, false);
-        canvas->setPen(CanvasColor::rgb(80, 80, 80), 1);
-        canvas->drawText(empty.left + 24, empty.top + 48,
-                         "Type a line below — panels scroll sideways.");
+        drawPanel(canvas, ScenePanel{}, empty);
+
+        canvas->save();
+        canvas->setLogicalOrigin(0, 0);
+        canvas->setLogicalScale(1.0, 1.0);
+        const RECT band{empty.left, empty.bottom - 56, empty.right, empty.bottom};
+        canvas->setBrush(CanvasColor::rgb(255, 255, 255, 220));
+        canvas->setPen(CanvasColor::rgb(40, 40, 40), 1);
+        canvas->fillRect(band);
+        canvas->setFont("Sans Serif", 11, false);
+        canvas->setPen(CanvasColor::rgb(30, 30, 30), 1);
+        canvas->drawText(band.left + 12, band.top + 22,
+                         "Room preview — type below to start chatting.");
         if (!m_status.empty()) {
-            canvas->drawText(empty.left + 24, empty.top + 80, m_status);
+            canvas->drawText(band.left + 12, band.top + 42, m_status);
         }
+        canvas->restore();
         return;
     }
 

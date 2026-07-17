@@ -6,17 +6,21 @@
 #include "net/IrcClient.h"
 
 #include <QCheckBox>
+#include <QComboBox>
 #include <QEvent>
 #include <QFrame>
 #include <QGroupBox>
 #include <QHash>
 #include <QHBoxLayout>
+#include <QIcon>
 #include <QLabel>
 #include <QLineEdit>
 #include <QListWidget>
+#include <QPixmap>
 #include <QPushButton>
 #include <QScrollArea>
 #include <QScrollBar>
+#include <QSize>
 #include <QSplitter>
 #include <QStatusBar>
 #include <QTimer>
@@ -46,6 +50,7 @@ MainWindow::MainWindow(QWidget *parent)
     connect(m_irc, &IrcClient::errorOccurred, this, &MainWindow::onIrcError);
     connect(m_irc, &IrcClient::connected, this, &MainWindow::onIrcConnected);
     connect(m_irc, &IrcClient::disconnected, this, &MainWindow::onIrcDisconnected);
+    connect(m_irc, &IrcClient::channelJoined, this, &MainWindow::onChannelJoined);
     connect(m_irc, &IrcClient::saslSucceeded, this, [this](const QString &did) {
         appendLog(QStringLiteral("Authenticated%1")
                       .arg(did.isEmpty() ? QString() : QStringLiteral(" as %1").arg(did)));
@@ -140,6 +145,12 @@ MainWindow::MainWindow(QWidget *parent)
     m_say->setPlaceholderText(QStringLiteral("Say something… (Enter)"));
     connect(m_say, &QLineEdit::returnPressed, this, &MainWindow::onSay);
 
+    m_room = new QComboBox(central);
+    m_room->setMinimumWidth(140);
+    m_room->setToolTip(QStringLiteral("Comic room / backdrop"));
+    connect(m_room, QOverload<int>::of(&QComboBox::currentIndexChanged), this,
+            &MainWindow::onRoomChanged);
+
     auto *clearBtn = new QPushButton(QStringLiteral("Clear panels"), central);
     connect(clearBtn, &QPushButton::clicked, this, [this]() {
         m_comic->clearPanels();
@@ -148,6 +159,8 @@ MainWindow::MainWindow(QWidget *parent)
         QTimer::singleShot(0, this, &MainWindow::syncComicSize);
     });
 
+    row->addWidget(new QLabel(QStringLiteral("Room"), central));
+    row->addWidget(m_room);
     row->addWidget(m_say, 1);
     row->addWidget(clearBtn);
 
@@ -158,8 +171,82 @@ MainWindow::MainWindow(QWidget *parent)
     setCentralWidget(central);
 
     updateAuthUi();
+    // Fill room list after first layout (art paths resolve relative to app).
+    QTimer::singleShot(0, this, [this]() {
+        populateRoomSelector();
+        syncComicSize();
+    });
     statusBar()->showMessage(QStringLiteral("Ready"));
-    QTimer::singleShot(0, this, &MainWindow::syncComicSize);
+}
+
+void MainWindow::populateRoomSelector()
+{
+    if (!m_room || !m_comic) {
+        return;
+    }
+    const QStringList rooms = m_comic->availableRooms();
+    const QSize thumb(72, 48);
+    m_room->blockSignals(true);
+    m_room->clear();
+    m_room->setIconSize(thumb);
+    for (const QString &base : rooms) {
+        // Friendly label; keep base name in item data for loading.
+        QString label = base;
+        if (base.compare(QStringLiteral("room8bs"), Qt::CaseInsensitive) == 0) {
+            label = QStringLiteral("Room");
+        } else if (base.compare(QStringLiteral("field"), Qt::CaseInsensitive) == 0) {
+            label = QStringLiteral("Field");
+        } else if (base.compare(QStringLiteral("pastoral"), Qt::CaseInsensitive) == 0) {
+            label = QStringLiteral("Pastoral");
+        } else if (!label.isEmpty()) {
+            label[0] = label[0].toUpper();
+        }
+        const QPixmap pm = m_comic->roomThumbnail(base, thumb);
+        if (!pm.isNull()) {
+            m_room->addItem(QIcon(pm), label, base);
+        } else {
+            m_room->addItem(label, base);
+        }
+    }
+    const QString cur = m_comic->currentRoom();
+    int idx = -1;
+    for (int i = 0; i < m_room->count(); ++i) {
+        if (m_room->itemData(i).toString().compare(cur, Qt::CaseInsensitive) == 0) {
+            idx = i;
+            break;
+        }
+    }
+    if (idx >= 0) {
+        m_room->setCurrentIndex(idx);
+    }
+    m_room->blockSignals(false);
+    m_room->setEnabled(m_room->count() > 0);
+
+    // Ensure first paint shows room preview (empty strip).
+    if (idx >= 0) {
+        m_comic->setRoom(m_room->itemData(idx).toString());
+    }
+}
+
+void MainWindow::onRoomChanged(int index)
+{
+    if (!m_comic || !m_room || index < 0) {
+        return;
+    }
+    const QString base = m_room->itemData(index).toString();
+    if (base.isEmpty()) {
+        return;
+    }
+    if (m_comic->setRoom(base)) {
+        appendLog(QStringLiteral("Room: %1").arg(m_room->currentText()));
+        statusBar()->showMessage(
+            QStringLiteral("Room preview: %1").arg(m_room->currentText()), 4000);
+        m_comic->update();
+        QTimer::singleShot(0, this, &MainWindow::syncComicSize);
+    } else {
+        appendLog(QStringLiteral("Could not load room “%1”").arg(base));
+        statusBar()->showMessage(m_comic->statusLine(), 6000);
+    }
 }
 
 bool MainWindow::eventFilter(QObject *watched, QEvent *event)
@@ -263,18 +350,27 @@ void MainWindow::onLoginSucceeded(const FreeqSession &session)
     appendLog(QStringLiteral("ATProto login OK — handle=%1 nick=%2 did=%3")
                   .arg(session.handle, session.nick, session.did));
     // Bind freeq identity → rpg.actor (by DID / live PDS if not in public index).
+    // Defer: rememberAtprotoIdentity may block on nested QEventLoop HTTP; never
+    // run that re-entrantly from FreeqAuth's OAuth socket path.
     if (m_comic) {
-        if (!session.handle.isEmpty()) {
-            m_comic->rememberAtprotoIdentity(session.handle, session.did);
-        }
-        if (!session.nick.isEmpty() && session.nick != session.handle) {
-            m_comic->rememberAtprotoIdentity(session.nick, session.did);
-        }
-        if (!session.displayIdentity().isEmpty() &&
-            session.displayIdentity() != session.handle &&
-            session.displayIdentity() != session.nick) {
-            m_comic->rememberAtprotoIdentity(session.displayIdentity(), session.did);
-        }
+        const FreeqSession sess = session;
+        QTimer::singleShot(0, this, [this, sess]() {
+            if (!m_comic) {
+                return;
+            }
+            if (!sess.handle.isEmpty()) {
+                m_comic->rememberAtprotoIdentity(sess.handle, sess.did);
+            }
+            if (!sess.nick.isEmpty() && sess.nick != sess.handle) {
+                m_comic->rememberAtprotoIdentity(sess.nick, sess.did);
+            }
+            if (!sess.displayIdentity().isEmpty() &&
+                sess.displayIdentity() != sess.handle &&
+                sess.displayIdentity() != sess.nick) {
+                m_comic->rememberAtprotoIdentity(sess.displayIdentity(), sess.did);
+            }
+            statusBar()->showMessage(m_comic->statusLine(), 4000);
+        });
     }
     statusBar()->showMessage(
         QStringLiteral("Logged in as %1 — hit Connect").arg(session.displayIdentity()), 8000);
@@ -329,6 +425,15 @@ void MainWindow::doIrcConnect(const FreeqSession &session)
         appendLog(QStringLiteral("Connecting as guest (no web-token)…"));
     }
 
+    // rpg.actor: index IRC nick + handle → DID before chat starts.
+    if (m_comic && !session.did.isEmpty()) {
+        m_comic->rememberAtprotoIdentity(nick, session.did);
+        if (!session.handle.isEmpty() &&
+            session.handle.compare(nick, Qt::CaseInsensitive) != 0) {
+            m_comic->rememberAtprotoIdentity(session.handle, session.did);
+        }
+    }
+
     m_irc->connectToServer(m_host->text(), port, nick, m_channel->text(), m_tls->isChecked());
     setConnectedUi(true);
 }
@@ -375,6 +480,8 @@ void MainWindow::onSay()
     }
 
     if (m_irc->isConnected()) {
+        // Bind server msgid from echo-message so replies to us resolve.
+        m_comic->noteOutgoingMessage(text, who);
         m_irc->sendChannelMessage(text);
     }
 
@@ -385,15 +492,79 @@ void MainWindow::onSay()
     QTimer::singleShot(0, this, &MainWindow::syncComicSize);
 }
 
-void MainWindow::onIrcMessage(const QString &nick, const QString &text,
-                              const QHash<QString, QString> &tags)
+void MainWindow::onChannelJoined(const QString &channel)
 {
+    appendLog(QStringLiteral("Joined %1 — caching recent history for replies…").arg(channel));
+    m_joiningHistory = true;
+    // freeq join-replay + CHATHISTORY usually finish within a second or two.
+    QTimer::singleShot(4000, this, [this]() { m_joiningHistory = false; });
+}
+
+void MainWindow::onIrcMessage(const QString &nick, const QString &text,
+                              const QHash<QString, QString> &tags, bool history)
+{
+    const bool hist = history || m_joiningHistory;
+    const QString replyTo = tags.value(QStringLiteral("+reply")).isEmpty()
+                                ? tags.value(QStringLiteral("reply"))
+                                : tags.value(QStringLiteral("+reply"));
+    const bool isReply = !replyTo.isEmpty();
+
+    auto appendReplyLog = [&](const QString &speaker) {
+        QString origNick;
+        QString origText;
+        const bool haveParent =
+            m_comic && m_comic->lookupCachedMessage(replyTo, &origNick, &origText);
+        if (haveParent) {
+            appendLog(QStringLiteral("  ↩ %1: %2").arg(origNick, origText));
+        } else {
+            appendLog(QStringLiteral("  ↩ (original not in buffer)"));
+        }
+        appendLog(QStringLiteral("%1 (reply): %2").arg(speaker, text));
+    };
+
+    // freeq echo-message / join-history: always cache msgid → text for +reply.
     if (m_irc && nick.compare(m_irc->nick(), Qt::CaseInsensitive) == 0) {
+        if (m_comic) {
+            m_comic->rememberIrcMessage(text, nick, tags);
+            // Bind DID from account-tag for our own echoes too.
+            const QString did = tags.value(QStringLiteral("account"));
+            if (!did.isEmpty() && did.startsWith(QLatin1String("did:"))) {
+                m_comic->rememberAtprotoIdentity(nick, did);
+            }
+        }
+        if (hist) {
+            appendLog(QStringLiteral("(history/self) %1: %2").arg(nick, text));
+            return;
+        }
+        // Self reply echo: local onSay already drew a plain panel; still draw the
+        // reply frame (original + reply) and log both lines.
+        if (isReply && m_comic) {
+            appendReplyLog(nick);
+            m_comic->addChatLine(text, nick, tags);
+            statusBar()->showMessage(m_comic->statusLine(), 4000);
+            QTimer::singleShot(0, this, &MainWindow::syncComicSize);
+            return;
+        }
         appendLog(QStringLiteral("(echo) %1: %2").arg(nick, text));
         return;
     }
+
+    // Join-replay / CHATHISTORY: fill parent cache only (don't flood the strip).
+    if (hist) {
+        if (m_comic) {
+            m_comic->rememberIrcMessage(text, nick, tags);
+            const QString did = tags.value(QStringLiteral("account"));
+            if (!did.isEmpty() && did.startsWith(QLatin1String("did:"))) {
+                m_comic->rememberAtprotoIdentity(nick, did);
+            }
+        }
+        return;
+    }
+
     const QString mediaUrl = tags.value(QStringLiteral("media-url"));
-    if (!mediaUrl.isEmpty()) {
+    if (isReply) {
+        appendReplyLog(nick);
+    } else if (!mediaUrl.isEmpty()) {
         appendLog(QStringLiteral("%1: [image] %2").arg(nick, mediaUrl));
     } else {
         appendLog(QStringLiteral("%1: %2").arg(nick, text));

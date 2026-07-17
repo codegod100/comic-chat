@@ -36,18 +36,22 @@ public slots:
     void sendRaw(const QString &line);
     void sendPrivmsg(const QString &target, const QString &text);
     void sendChannelMessage(const QString &text);
+    // freeq / IRCv3 draft/chathistory — fill msgid cache for +reply parents.
+    void requestHistoryLatest(int count = 80);
 
 signals:
     void connected();
     void disconnected();
     void statusMessage(const QString &msg);
-    // tags may include freeq media-url, content-type, media-alt, …
+    // tags may include freeq media-url, content-type, media-alt, msgid, +reply, …
+    // history=true for join-replay / CHATHISTORY (cache parents, don't comic-panel).
     void channelMessage(const QString &nick, const QString &text,
-                        const QHash<QString, QString> &tags);
+                        const QHash<QString, QString> &tags, bool history);
     void serverNotice(const QString &text);
     void errorOccurred(const QString &msg);
     void saslSucceeded(const QString &did);
     void saslFailed(const QString &reason);
+    void channelJoined(const QString &channel);
 
 private slots:
     void onConnected();
@@ -69,6 +73,7 @@ private:
     void handleAuthenticate(const QStringList &params);
     void sendWebTokenSaslResponse();
     void finishCap();
+    void maybeRequestCaps();
     // IRCv3: @key=value;key2=value2  → map (unescaped values)
     static QHash<QString, QString> parseTags(const QString &tagStr);
     static QString unescapeTagValue(const QString &v);
@@ -88,6 +93,14 @@ private:
     bool m_capNegotiating = false;
     bool m_saslInProgress = false;
     bool m_wantSasl = false;
+    // CAP LS 302 multi-line accumulation
+    QString m_capLsAccum;
+    bool m_capLsComplete = false;
+    bool m_capRequested = false;
+    QStringList m_ackedCaps;
+    // Join-history / CHATHISTORY batch tracking
+    QString m_historyBatchId;
+    bool m_inHistoryBatch = false;
 
     QTimer m_keepAliveTimer;
     qint64 m_lastServerActivityMs = 0;

@@ -101,6 +101,9 @@ private:
     void serveOkClose(QTcpSocket *sock, const QString &title, const QString &body);
     bool applyOauthPayload(const QByteArray &b64url);
     void persistSession() const;
+    // Finish OAuth without re-entering readyRead (nested event loops / UAF).
+    void finishLoginSuccess(QTcpSocket *sock);
+    void finishLoginFailure(QTcpSocket *sock, const QString &htmlMsg, const QString &signalMsg);
     static QString percentEncode(const QString &s);
 
     QNetworkAccessManager m_nam;

@@ -13,6 +13,7 @@
 #include <QPaintEvent>
 #include <QPainter>
 #include <QRegularExpression>
+#include <QSettings>
 #include <QShowEvent>
 #include <QUrl>
 
@@ -72,15 +73,15 @@ void ComicWidget::rememberAtprotoIdentity(const QString &handleOrNick, const QSt
 
 void ComicWidget::ensureRpgSprite(const QString &nick)
 {
-    if (nick.isEmpty()) {
+    if (nick.isEmpty() || nick == QLatin1String("?")) {
         return;
     }
     if (m_scene.hasRpgSpriteForNick(nick.toStdString())) {
         return;
     }
     // Full walk sheet for left/right/down facing (rpg.actor 3×4 standard).
-    // Registry first, then live PDS if not indexed yet.
-    auto sheet = m_rpg.spriteSheetForNick(nick, 6000);
+    // Registry first, then live PDS if not indexed yet (by handle or remembered DID).
+    auto sheet = m_rpg.spriteSheetForNick(nick, 8000);
     if (!sheet || sheet->isNull()) {
         return;
     }
@@ -94,6 +95,15 @@ void ComicWidget::ensureRpgSprite(const QString &nick)
     }
     m_scene.setRpgSpriteForNick(nick.toStdString(), sheet->sheet, label.toStdString(),
                                 /*isSheet=*/true, sheet->columns, sheet->rows);
+    // Also index under handle if different, so bodyForNick(nick) and bodyForNick(handle) match.
+    if (auto ref = m_rpg.lookupNick(nick)) {
+        if (!ref->handle.isEmpty() &&
+            ref->handle.compare(nick, Qt::CaseInsensitive) != 0) {
+            m_scene.setRpgSpriteForNick(ref->handle.toStdString(), sheet->sheet,
+                                        label.toStdString(), true, sheet->columns,
+                                        sheet->rows);
+        }
+    }
 }
 
 bool ComicWidget::looksLikeImageUrl(const QUrl &url)
@@ -217,6 +227,113 @@ void ComicWidget::fetchAndShowImage(const QUrl &url, const QString &caption, con
     });
 }
 
+QString ComicWidget::messageId(const QHash<QString, QString> &tags)
+{
+    // freeq / IRCv3: server-assigned msgid (sometimes Message-ID style).
+    if (tags.contains(QStringLiteral("msgid"))) {
+        return tags.value(QStringLiteral("msgid"));
+    }
+    if (tags.contains(QStringLiteral("Message-ID"))) {
+        return tags.value(QStringLiteral("Message-ID"));
+    }
+    return {};
+}
+
+QString ComicWidget::replyParentId(const QHash<QString, QString> &tags)
+{
+    // freeq-sdk client.reply() → +reply=<parent msgid>
+    // Also accept draft/reply and un-plus'd variants seen on the wire.
+    static const char *keys[] = {"+reply", "reply", "+draft/reply", "draft/reply",
+                                 "in-reply-to"};
+    for (const char *k : keys) {
+        const QString v = tags.value(QString::fromLatin1(k));
+        if (!v.isEmpty()) {
+            return v;
+        }
+    }
+    return {};
+}
+
+void ComicWidget::cacheMessage(const QString &msgid, const QString &nick, const QString &text)
+{
+    if (msgid.isEmpty() || text.isEmpty()) {
+        return;
+    }
+    if (!m_msgById.contains(msgid)) {
+        m_msgIdOrder.append(msgid);
+        while (m_msgIdOrder.size() > kMaxCachedMsgs) {
+            const QString old = m_msgIdOrder.takeFirst();
+            m_msgById.remove(old);
+        }
+    }
+    m_msgById.insert(msgid, CachedChatLine{nick, text});
+}
+
+void ComicWidget::noteOutgoingMessage(const QString &text, const QString &nick)
+{
+    const QString who = nick.isEmpty() ? QStringLiteral("you") : nick;
+    const QString t = text.trimmed();
+    if (t.isEmpty()) {
+        return;
+    }
+    m_pendingOut.append(PendingOut{who, t});
+    while (m_pendingOut.size() > 50) {
+        m_pendingOut.removeFirst();
+    }
+}
+
+bool ComicWidget::hasCachedMessage(const QString &msgid) const
+{
+    return !msgid.isEmpty() && m_msgById.contains(msgid);
+}
+
+bool ComicWidget::lookupCachedMessage(const QString &msgid, QString *nickOut,
+                                      QString *textOut) const
+{
+    if (msgid.isEmpty()) {
+        return false;
+    }
+    auto it = m_msgById.constFind(msgid);
+    if (it == m_msgById.constEnd()) {
+        for (auto i = m_msgById.constBegin(); i != m_msgById.constEnd(); ++i) {
+            if (i.key().compare(msgid, Qt::CaseInsensitive) == 0) {
+                it = i;
+                break;
+            }
+        }
+    }
+    if (it == m_msgById.constEnd()) {
+        return false;
+    }
+    if (nickOut) {
+        *nickOut = it->nick;
+    }
+    if (textOut) {
+        *textOut = it->text;
+    }
+    return true;
+}
+
+void ComicWidget::rememberIrcMessage(const QString &text, const QString &nick,
+                                     const QHash<QString, QString> &tags)
+{
+    const QString who = nick.isEmpty() ? QStringLiteral("you") : nick;
+    const QString mid = messageId(tags);
+    cacheMessage(mid, who, text);
+
+    // Bind local optimistic sends to server msgid (echo-message).
+    if (!mid.isEmpty() && !m_pendingOut.isEmpty()) {
+        const QString t = text.trimmed();
+        for (int i = 0; i < m_pendingOut.size(); ++i) {
+            if (m_pendingOut.at(i).text == t &&
+                m_pendingOut.at(i).nick.compare(who, Qt::CaseInsensitive) == 0) {
+                m_pendingOut.removeAt(i);
+                break;
+            }
+        }
+    }
+}
+
 void ComicWidget::handlePossiblyMedia(const QString &text, const QString &nick,
                                       const QHash<QString, QString> &tags)
 {
@@ -226,7 +343,61 @@ void ComicWidget::handlePossiblyMedia(const QString &text, const QString &nick,
         return;
     }
     const QString who = nick.isEmpty() ? QStringLiteral("you") : nick;
+
+    // freeq account-tag: account=did:plc:… — best key for rpg.actor live fetch.
+    const QString accountDid = tags.value(QStringLiteral("account"));
+    if (!accountDid.isEmpty() && accountDid.startsWith(QLatin1String("did:"))) {
+        m_rpg.rememberDidForNick(who, accountDid);
+    }
     ensureRpgSprite(who);
+
+    // freeq: remember every line by msgid so later +reply can re-stage the original.
+    const QString msgid = messageId(tags);
+    cacheMessage(msgid, who, text);
+
+    // Threaded reply → dedicated panel with original + reply (freeq ReplyBadge UX).
+    const QString parentId = replyParentId(tags);
+    if (!parentId.isEmpty()) {
+        QString origNick;
+        QString origText;
+        if (!lookupCachedMessage(parentId, &origNick, &origText) || origText.isEmpty()) {
+            origNick = QStringLiteral("?");
+            origText = QStringLiteral("(original not in buffer)");
+        }
+        // Load sprites for both speakers before laying out bodies.
+        if (origNick != QLatin1String("?")) {
+            ensureRpgSprite(origNick);
+        }
+        ensureRpgSprite(who);
+        m_scene.addReplyExchange(origNick.toStdString(), origText.toStdString(),
+                                 who.toStdString(), text.toStdString(), SM_SAY);
+        relayout();
+        update();
+
+        // If reply is primarily an image, also attach media after the frame.
+        QString mediaUrl = tags.value(QStringLiteral("media-url"));
+        const QString contentType = tags.value(QStringLiteral("content-type"));
+        bool isImage = false;
+        if (!mediaUrl.isEmpty()) {
+            isImage = contentType.isEmpty() || contentTypeIsImage(contentType) ||
+                      looksLikeImageUrl(QUrl(mediaUrl));
+        }
+        if (!isImage) {
+            const QString found = extractImageUrl(text);
+            if (!found.isEmpty() && looksLikeImageUrl(QUrl(found))) {
+                mediaUrl = found;
+                isImage = true;
+            }
+        }
+        if (isImage && !mediaUrl.isEmpty()) {
+            QString alt = tags.value(QStringLiteral("media-alt"));
+            if (alt.isEmpty()) {
+                alt = stripUrls(text);
+            }
+            fetchAndShowImage(QUrl(mediaUrl), alt, who);
+        }
+        return;
+    }
 
     // freeq IRCv3 tags (see freeq-sdk media.rs)
     QString mediaUrl = tags.value(QStringLiteral("media-url"));
@@ -289,12 +460,88 @@ void ComicWidget::clearPanels()
     update();
 }
 
+QStringList ComicWidget::availableRooms() const
+{
+    std::string dir = m_backdropDir.toStdString();
+    if (dir.empty()) {
+        dir = resolveArtPaths().backdrop;
+    }
+    QStringList out;
+    for (const auto &n : ListBackdropNames(dir)) {
+        out << QString::fromStdString(n);
+    }
+    return out;
+}
+
+bool ComicWidget::setRoom(const QString &baseName)
+{
+    const QString want = baseName.trimmed();
+    if (want.isEmpty()) {
+        return false;
+    }
+
+    ensureAssetsLoaded();
+    if (m_backdropDir.isEmpty()) {
+        return false;
+    }
+
+    if (want.compare(m_roomName, Qt::CaseInsensitive) == 0 && m_assetsOk) {
+        update(); // still refresh so empty-state preview paints
+        return true;
+    }
+
+    ComicImage backdrop;
+    if (!LoadBackdropImage(m_backdropDir.toStdString(), want.toStdString(), backdrop)) {
+        m_loadError = QStringLiteral("Could not load room “%1”").arg(want);
+        update();
+        return false;
+    }
+
+    m_roomName = want;
+    QSettings s;
+    s.setValue(QStringLiteral("comic/room"), m_roomName);
+
+    if (m_assetsOk) {
+        m_scene.setBackdrop(backdrop);
+        m_loadError.clear();
+    } else {
+        // Avatars not ready yet — room choice is remembered for ensureAssetsLoaded.
+    }
+    update();
+    emit roomChanged(m_roomName);
+    return true;
+}
+
+QPixmap ComicWidget::roomThumbnail(const QString &baseName, const QSize &size) const
+{
+    if (baseName.trimmed().isEmpty() || !size.isValid() || size.isEmpty()) {
+        return {};
+    }
+    std::string dir = m_backdropDir.toStdString();
+    if (dir.empty()) {
+        dir = resolveArtPaths().backdrop;
+    }
+    ComicImage img;
+    if (!LoadBackdropImage(dir, baseName.toStdString(), img) || img.isNull()) {
+        return {};
+    }
+    const QImage scaled =
+        img.qimage().scaled(size, Qt::KeepAspectRatioByExpanding, Qt::SmoothTransformation);
+    const QImage cropped = scaled.copy((scaled.width() - size.width()) / 2,
+                                       (scaled.height() - size.height()) / 2, size.width(),
+                                       size.height());
+    return QPixmap::fromImage(cropped);
+}
+
 QString ComicWidget::statusLine() const
 {
     if (!m_loadError.isEmpty()) {
         return m_loadError;
     }
     QString s = QString::fromStdString(m_scene.status());
+    if (!m_roomName.isEmpty()) {
+        s += QStringLiteral(" | room: %1").arg(m_roomName);
+    }
     if (m_rpg.registryReady()) {
         s += QStringLiteral(" | rpg.actor: %1").arg(m_rpg.actorCount());
     } else {
@@ -335,9 +582,39 @@ void ComicWidget::ensureAssetsLoaded()
 
     const ArtPaths art = resolveArtPaths();
     setAvatarArtDir(art.avatars);
+    m_backdropDir = QString::fromStdString(art.backdrop);
+
+    // Prefer last-chosen room, then classic default, then first on disk.
+    QSettings s;
+    QString room = s.value(QStringLiteral("comic/room"), m_roomName).toString().trimmed();
+    if (room.isEmpty()) {
+        room = QStringLiteral("room8bs");
+    }
+    const QStringList rooms = availableRooms();
+    if (!rooms.isEmpty()) {
+        bool found = false;
+        for (const QString &r : rooms) {
+            if (r.compare(room, Qt::CaseInsensitive) == 0) {
+                room = r;
+                found = true;
+                break;
+            }
+        }
+        if (!found) {
+            // Prefer room8bs if present, else first file.
+            room = rooms.first();
+            for (const QString &r : rooms) {
+                if (r.compare(QStringLiteral("room8bs"), Qt::CaseInsensitive) == 0) {
+                    room = r;
+                    break;
+                }
+            }
+        }
+    }
+    m_roomName = room;
 
     ComicImage backdrop;
-    if (!LoadBackdropImage(art.backdrop, "room8bs", backdrop)) {
+    if (!LoadBackdropImage(art.backdrop, m_roomName.toStdString(), backdrop)) {
         m_loadError = QStringLiteral("No backdrop in %1")
                           .arg(QString::fromStdString(art.backdrop));
         return;

@@ -10,6 +10,7 @@
 class ComicWidget;
 class IrcClient;
 class QCheckBox;
+class QComboBox;
 class QLabel;
 class QLineEdit;
 class QListWidget;
@@ -31,27 +32,31 @@ private slots:
     void onLogin();
     void onLogout();
     void onIrcMessage(const QString &nick, const QString &text,
-                      const QHash<QString, QString> &tags);
+                      const QHash<QString, QString> &tags, bool history);
     void onIrcStatus(const QString &msg);
     void onIrcError(const QString &msg);
     void onIrcConnected();
     void onIrcDisconnected();
+    void onChannelJoined(const QString &channel);
     void onAuthStatus(const QString &msg);
     void onLoginSucceeded(const FreeqSession &session);
     void onLoginFailed(const QString &reason);
     void onSessionRefreshed(const FreeqSession &session);
     void syncComicSize();
+    void onRoomChanged(int index);
 
 private:
     void appendLog(const QString &line);
     void setConnectedUi(bool on);
     void updateAuthUi();
     void doIrcConnect(const FreeqSession &session);
+    void populateRoomSelector();
 
     ComicWidget *m_comic = nullptr;
     QScrollArea *m_comicScroll = nullptr;
     QListWidget *m_log = nullptr;
     QLineEdit *m_say = nullptr;
+    QComboBox *m_room = nullptr;
 
     QLineEdit *m_host = nullptr;
     QLineEdit *m_port = nullptr;
@@ -69,4 +74,7 @@ private:
     FreeqAuth *m_auth = nullptr;
     bool m_syncingComic = false;
     bool m_connectAfterRefresh = false;
+    // freeq join-replays history; treat as cache-only for a short window if
+    // BATCH tags are missing so +reply parents still resolve.
+    bool m_joiningHistory = false;
 };

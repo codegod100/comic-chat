@@ -100,6 +100,8 @@ public:
     void setArt(std::vector<LoadedAvatar> avatars, const ComicImage &backdrop);
     // Convenience: single avatar cast.
     void setArt(const LoadedAvatar &avatar, const ComicImage &backdrop);
+    // Swap room art without clearing panels or nick→avatar mapping.
+    void setBackdrop(const ComicImage &backdrop);
 
     void clear();
 
@@ -112,6 +114,12 @@ public:
     // Caption may be empty; image must be non-null.
     void addImageLine(const ComicImage &image, const std::string &caption = {},
                       UCHAR mode = SM_SAY, const std::string &nick = "you");
+
+    // freeq-style reply: always a new panel with original line + reply (two balloons).
+    // origText may be empty if the parent msgid was not in the local cache.
+    void addReplyExchange(const std::string &origNick, const std::string &origText,
+                          const std::string &replyNick, const std::string &replyText,
+                          UCHAR replyMode = SM_SAY);
 
     // Prefer this image for the nick (rpg.actor sprite). Empty image clears override.
     // Pass a full walk sheet (isSheet=true) with columns/rows for directional facing.

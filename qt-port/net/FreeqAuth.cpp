@@ -8,9 +8,11 @@
 #include <QJsonObject>
 #include <QNetworkReply>
 #include <QNetworkRequest>
+#include <QPointer>
 #include <QSettings>
 #include <QTcpServer>
 #include <QTcpSocket>
+#include <QTimer>
 #include <QUrl>
 #include <QUrlQuery>
 
@@ -106,10 +108,25 @@ void FreeqAuth::clearSession()
 void FreeqAuth::stopListener()
 {
     m_loginInProgress = false;
+    // Drop client sockets first so no readyRead can fire into a half-torn-down
+    // login (OAuth callback + nested event loops used to UAF here).
     if (m_server) {
+        const auto clients = m_server->findChildren<QTcpSocket *>();
+        for (QTcpSocket *s : clients) {
+            s->disconnect(this);
+            s->disconnectFromHost();
+            s->deleteLater();
+        }
         m_server->close();
         m_server->deleteLater();
         m_server = nullptr;
+    }
+    // Also clean up any sockets reparented onto FreeqAuth.
+    const auto orphans = findChildren<QTcpSocket *>(QString(), Qt::FindDirectChildrenOnly);
+    for (QTcpSocket *s : orphans) {
+        s->disconnect(this);
+        s->disconnectFromHost();
+        s->deleteLater();
     }
 }
 
@@ -150,9 +167,9 @@ void FreeqAuth::login(const QString &handle)
     m_loginInProgress = true;
     emit statusMessage(QStringLiteral("Opening browser to sign in as %1…").arg(h));
     if (!QDesktopServices::openUrl(QUrl(url))) {
-        emit loginFailed(QStringLiteral("Could not open browser. Visit:\n%1").arg(url));
-        stopListener();
-        return;
+        // Keep the loopback listener up so the user can paste the URL manually.
+        emit statusMessage(
+            QStringLiteral("Could not open browser — open this URL:\n%1").arg(url));
     }
     emit statusMessage(QStringLiteral("Waiting for browser login (loopback :%1)…").arg(port));
 }
@@ -168,6 +185,33 @@ void FreeqAuth::onNewConnection()
         connect(sock, &QTcpSocket::readyRead, this, &FreeqAuth::onClientReadyRead);
         connect(sock, &QTcpSocket::disconnected, sock, &QObject::deleteLater);
     }
+}
+
+void FreeqAuth::finishLoginSuccess(QTcpSocket *sock)
+{
+    // Caller already disconnected FreeqAuth from sock (readyRead). Reply and
+    // emit only after leaving the socket notifier stack — loginSucceeded used
+    // to run nested QEventLoop HTTP (rpg.actor) and UAF the QTcpSocket.
+    persistSession();
+    serveOkClose(sock, QStringLiteral("Signed in"),
+                 QStringLiteral("You are signed in as <b>%1</b>. Return to Comic Chat.")
+                     .arg(m_session.handle.toHtmlEscaped()));
+    const FreeqSession sess = m_session;
+    QTimer::singleShot(0, this, [this, sess]() {
+        emit statusMessage(QStringLiteral("Logged in as %1").arg(sess.handle));
+        emit loginSucceeded(sess);
+        stopListener();
+    });
+}
+
+void FreeqAuth::finishLoginFailure(QTcpSocket *sock, const QString &htmlMsg,
+                                   const QString &signalMsg)
+{
+    serveOkClose(sock, QStringLiteral("Login failed"), htmlMsg);
+    QTimer::singleShot(0, this, [this, signalMsg]() {
+        emit loginFailed(signalMsg);
+        stopListener();
+    });
 }
 
 void FreeqAuth::onClientReadyRead()
@@ -186,11 +230,14 @@ void FreeqAuth::onClientReadyRead()
     const int hdrEnd = buf.indexOf("\r\n\r\n");
     if (hdrEnd < 0) {
         if (buf.size() > 8192) {
+            sock->disconnect(this);
             serveHtml(sock, QByteArrayLiteral("Bad request"), 400);
-            sock->disconnectFromHost();
         }
         return;
     }
+
+    // One request per connection for our mini HTTP server.
+    sock->disconnect(this);
 
     const QByteArray reqLine = buf.left(buf.indexOf("\r\n"));
     // GET /path?query HTTP/1.1
@@ -208,32 +255,24 @@ void FreeqAuth::onClientReadyRead()
         QUrlQuery uq(QString::fromUtf8(query));
         const QString oauth = uq.queryItemValue(QStringLiteral("oauth"));
         if (oauth.isEmpty()) {
-            serveOkClose(sock, QStringLiteral("Login failed"),
-                         QStringLiteral("Missing oauth payload."));
-            emit loginFailed(QStringLiteral("Broker callback missing oauth payload"));
-            stopListener();
+            finishLoginFailure(sock, QStringLiteral("Missing oauth payload."),
+                               QStringLiteral("Broker callback missing oauth payload"));
             return;
         }
         if (!applyOauthPayload(oauth.toUtf8())) {
-            serveOkClose(sock, QStringLiteral("Login failed"),
-                         QStringLiteral("Could not parse login result."));
-            emit loginFailed(QStringLiteral("Invalid oauth payload from broker"));
-            stopListener();
+            finishLoginFailure(sock, QStringLiteral("Could not parse login result."),
+                               QStringLiteral("Invalid oauth payload from broker"));
             return;
         }
-        persistSession();
-        serveOkClose(sock, QStringLiteral("Signed in"),
-                     QStringLiteral("You are signed in as <b>%1</b>. Return to Comic Chat.")
-                         .arg(m_session.handle.toHtmlEscaped()));
-        emit statusMessage(QStringLiteral("Logged in as %1").arg(m_session.handle));
-        emit loginSucceeded(m_session);
-        stopListener();
+        finishLoginSuccess(sock);
         return;
     }
 
     // Any other path (including /callback after redirect): fragment bridge page.
+    // Re-attach readyRead so the browser's follow-up /complete on this or a
+    // new connection still works; /callback itself is a one-shot response.
     serveHtml(sock, QByteArray(kFragmentBridgeHtml));
-    // Keep connection briefly; browser will navigate to /complete.
+    // Keep connection briefly; browser will navigate to /complete (usually new conn).
 }
 
 void FreeqAuth::serveHtml(QTcpSocket *sock, const QByteArray &body, int status)

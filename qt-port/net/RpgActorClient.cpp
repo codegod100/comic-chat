@@ -9,6 +9,7 @@
 #include <QJsonObject>
 #include <QNetworkReply>
 #include <QNetworkRequest>
+#include <QPointer>
 #include <QTimer>
 #include <QUrl>
 #include <QUrlQuery>
@@ -242,15 +243,20 @@ bool RpgActorClient::downloadBytes(const QUrl &url, QByteArray &out, int timeout
     req.setAttribute(QNetworkRequest::RedirectPolicyAttribute,
                      QNetworkRequest::NoLessSafeRedirectPolicy);
 
-    QNetworkReply *reply = m_nam.get(req);
+    QPointer<QNetworkReply> reply = m_nam.get(req);
     QEventLoop loop;
     QTimer timer;
     timer.setSingleShot(true);
     QObject::connect(&timer, &QTimer::timeout, &loop, &QEventLoop::quit);
-    QObject::connect(reply, &QNetworkReply::finished, &loop, &QEventLoop::quit);
+    if (reply) {
+        QObject::connect(reply, &QNetworkReply::finished, &loop, &QEventLoop::quit);
+    }
     timer.start(std::max(500, timeoutMs));
     loop.exec();
 
+    if (!reply) {
+        return false;
+    }
     if (!reply->isFinished() || reply->error() != QNetworkReply::NoError) {
         reply->abort();
         reply->deleteLater();

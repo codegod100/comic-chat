@@ -105,6 +105,12 @@ void IrcClient::connectToServer(const QString &host, quint16 port, const QString
     m_lastClientPingMs = 0;
     m_capNegotiating = false;
     m_saslInProgress = false;
+    m_capLsAccum.clear();
+    m_capLsComplete = false;
+    m_capRequested = false;
+    m_ackedCaps.clear();
+    m_historyBatchId.clear();
+    m_inHistoryBatch = false;
     // Keep m_webToken / m_wantSasl as set by caller.
 
     if (m_useTls) {
@@ -207,6 +213,51 @@ void IrcClient::finishCap()
     writeLine(QStringLiteral("CAP END"));
     m_capNegotiating = false;
     m_saslInProgress = false;
+    m_capLsAccum.clear();
+    m_capLsComplete = false;
+    m_capRequested = false;
+}
+
+void IrcClient::requestHistoryLatest(int count)
+{
+    if (!isConnected() || m_channel.isEmpty()) {
+        return;
+    }
+    // freeq: CHATHISTORY LATEST <target> * <limit>
+    writeLine(QStringLiteral("CHATHISTORY LATEST %1 * %2")
+                  .arg(m_channel)
+                  .arg(qBound(1, count, 200)));
+}
+
+void IrcClient::maybeRequestCaps()
+{
+    if (m_capRequested || !m_capLsComplete) {
+        return;
+    }
+    m_capRequested = true;
+    const QString caps = m_capLsAccum;
+    QStringList want;
+    // account-tag: freeq attaches account=did:plc:… so we can resolve rpg.actor.
+    const char *desired[] = {"message-tags", "echo-message", "server-time", "batch",
+                             "draft/chathistory", "multi-prefix", "account-notify",
+                             "account-tag", "extended-join"};
+    for (const char *c : desired) {
+        if (caps.contains(QString::fromLatin1(c), Qt::CaseInsensitive)) {
+            want << QString::fromLatin1(c);
+        }
+    }
+    if (m_wantSasl && !m_webToken.isEmpty() &&
+        caps.contains(QLatin1String("sasl"), Qt::CaseInsensitive)) {
+        want << QStringLiteral("sasl");
+    }
+    if (want.isEmpty()) {
+        finishCap();
+        return;
+    }
+    writeLine(QStringLiteral("CAP REQ :%1").arg(want.join(QLatin1Char(' '))));
+    if (want.contains(QStringLiteral("sasl"))) {
+        emit statusMessage(QStringLiteral("Negotiating SASL (ATProto)…"));
+    }
 }
 
 void IrcClient::onDisconnected()
@@ -359,48 +410,47 @@ void IrcClient::handleCap(const QString & /*prefix*/, const QStringList &params)
         return;
     }
 
-    // Caps list is everything after the subcommand (skip a lone "*" continuation marker).
+    // Caps list is everything after the subcommand.
+    // Multi-line CAP LS 302: "CAP * LS * :caps…" then final "CAP * LS :caps…" (no *).
     QStringList rest = params.mid(subIdx + 1);
+    bool continuation = false;
     if (!rest.isEmpty() && rest.first() == QLatin1String("*")) {
+        continuation = true;
         rest.removeFirst();
     }
     const QString caps = rest.join(QLatin1Char(' '));
 
     if (sub == QLatin1String("LS")) {
-        QStringList want;
-        // freeq media uses IRCv3 tags (media-url, content-type, …).
-        if (caps.contains(QLatin1String("message-tags"), Qt::CaseInsensitive)) {
-            want << QStringLiteral("message-tags");
-        }
-        if (m_wantSasl && !m_webToken.isEmpty() &&
-            caps.contains(QLatin1String("sasl"), Qt::CaseInsensitive)) {
-            want << QStringLiteral("sasl");
-        }
-        if (want.isEmpty()) {
-            finishCap();
-        } else {
-            writeLine(QStringLiteral("CAP REQ :%1").arg(want.join(QLatin1Char(' '))));
-            if (want.contains(QStringLiteral("sasl"))) {
-                emit statusMessage(QStringLiteral("Negotiating SASL (ATProto)…"));
+        if (!caps.isEmpty()) {
+            if (!m_capLsAccum.isEmpty()) {
+                m_capLsAccum += QLatin1Char(' ');
             }
+            m_capLsAccum += caps;
+        }
+        // Only REQ after the final LS line (no "*" continuation marker).
+        if (!continuation) {
+            m_capLsComplete = true;
+            maybeRequestCaps();
         }
         return;
     }
 
     if (sub == QLatin1String("ACK")) {
-        if (caps.contains(QLatin1String("sasl"), Qt::CaseInsensitive) &&
-            !m_webToken.isEmpty()) {
+        for (const QString &c : caps.split(QLatin1Char(' '), Qt::SkipEmptyParts)) {
+            m_ackedCaps.append(c.toLower());
+        }
+        const bool hasSasl = caps.contains(QLatin1String("sasl"), Qt::CaseInsensitive);
+        if (hasSasl && !m_webToken.isEmpty()) {
             m_saslInProgress = true;
             writeLine(QStringLiteral("AUTHENTICATE ATPROTO-CHALLENGE"));
         } else {
-            // message-tags only (or empty ack) — end CAP now.
             finishCap();
         }
         return;
     }
 
     if (sub == QLatin1String("NAK")) {
-        emit statusMessage(QStringLiteral("Server rejected SASL — continuing as guest"));
+        emit statusMessage(QStringLiteral("Server rejected some CAPs — continuing"));
         finishCap();
         return;
     }
@@ -622,9 +672,39 @@ void IrcClient::processLine(const QString &line)
         return;
     }
 
+    // IRCv3 BATCH +chathistory / -chathistory (freeq join replay + CHATHISTORY)
+    if (cmd == QLatin1String("BATCH") && !params.isEmpty()) {
+        const QString ref = params.at(0);
+        if (ref.startsWith(QLatin1Char('+'))) {
+            const QString id = ref.mid(1);
+            const QString type = params.size() >= 2 ? params.at(1).toLower() : QString();
+            if (type.contains(QLatin1String("chathistory")) ||
+                type.contains(QLatin1String("history"))) {
+                m_historyBatchId = id;
+                m_inHistoryBatch = true;
+            }
+        } else if (ref.startsWith(QLatin1Char('-'))) {
+            const QString id = ref.mid(1);
+            if (id == m_historyBatchId) {
+                m_historyBatchId.clear();
+                m_inHistoryBatch = false;
+            }
+        }
+        return;
+    }
+
     if (cmd == QLatin1String("JOIN")) {
         QString nick = prefix.section(QLatin1Char('!'), 0, 0);
-        emit statusMessage(QStringLiteral("%1 joined %2").arg(nick, m_channel));
+        const QString chan = params.isEmpty() ? m_channel : params.first();
+        emit statusMessage(QStringLiteral("%1 joined %2").arg(nick, chan));
+        if (nick.compare(m_nick, Qt::CaseInsensitive) == 0) {
+            emit channelJoined(chan);
+            // freeq also join-replays history; CHATHISTORY fills DB history too.
+            if (m_ackedCaps.contains(QStringLiteral("draft/chathistory")) ||
+                m_capLsAccum.contains(QLatin1String("draft/chathistory"), Qt::CaseInsensitive)) {
+                requestHistoryLatest(80);
+            }
+        }
         return;
     }
 
@@ -634,11 +714,17 @@ void IrcClient::processLine(const QString &line)
         const QString text = params.at(1);
         if (target.compare(m_channel, Qt::CaseInsensitive) == 0 ||
             target.compare(m_nick, Qt::CaseInsensitive) == 0) {
+            const QString batchId = tags.value(QStringLiteral("batch"));
+            const bool history =
+                m_inHistoryBatch ||
+                (!batchId.isEmpty() &&
+                 (batchId == m_historyBatchId || batchId.startsWith(QLatin1String("hist")) ||
+                  batchId.startsWith(QLatin1String("ch"))));
             if (text.startsWith(QLatin1String("\x01""ACTION ")) && text.endsWith(QChar(1))) {
                 QString action = text.mid(8, text.size() - 9);
-                emit channelMessage(nick, QStringLiteral("* %1").arg(action), tags);
+                emit channelMessage(nick, QStringLiteral("* %1").arg(action), tags, history);
             } else {
-                emit channelMessage(nick, text, tags);
+                emit channelMessage(nick, text, tags, history);
             }
         }
         return;
