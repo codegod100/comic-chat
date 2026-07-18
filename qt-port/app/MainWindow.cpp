@@ -16,7 +16,9 @@
 #include <QHash>
 #include <QHBoxLayout>
 #include <QIcon>
+#include <QInputDialog>
 #include <QKeyEvent>
+#include <QSet>
 #include <QLabel>
 #include <QLineEdit>
 #include <QListWidget>
@@ -39,6 +41,63 @@ namespace {
 constexpr int kRoleMsgId = Qt::UserRole;
 constexpr int kRoleNick = Qt::UserRole + 1;
 constexpr int kRoleText = Qt::UserRole + 2;
+constexpr int kRoleReacts = Qt::UserRole + 3; // {emoji: [nicks]} as QVariantMap
+constexpr int kRoleBaseLine = Qt::UserRole + 4; // original displayLine without reacts
+
+QString formatLogRowWithReacts(const QString &baseLine,
+                               const QHash<QString, QSet<QString>> &reacts)
+{
+    if (reacts.isEmpty()) {
+        return baseLine;
+    }
+    QStringList pills;
+    // Sorted for stable UI
+    for (auto it = reacts.constBegin(); it != reacts.constEnd(); ++it) {
+        const int count = it.value().size();
+        if (count <= 0) {
+            continue;
+        }
+        QString pill = it.key();
+        if (count > 1) {
+            pill += QStringLiteral(" %1").arg(count);
+        }
+        pills << pill;
+    }
+    if (pills.isEmpty()) {
+        return baseLine;
+    }
+    return baseLine + QStringLiteral("   [") + pills.join(QStringLiteral("  ")) +
+           QStringLiteral("]");
+}
+
+QHash<QString, QSet<QString>> reactsFromItemData(const QVariant &var)
+{
+    QHash<QString, QSet<QString>> out;
+    if (!var.isValid()) {
+        return out;
+    }
+    // Stored as QJsonObject / QHash serialized as QVariantMap<string, QStringList>
+    const QVariantMap map = var.toMap();
+    for (auto it = map.constBegin(); it != map.constEnd(); ++it) {
+        const QStringList nicks = it.value().toStringList();
+        for (const QString &n : nicks) {
+            out[it.key()].insert(n);
+        }
+    }
+    return out;
+}
+
+QVariant reactsToItemData(const QHash<QString, QSet<QString>> &reacts)
+{
+    QVariantMap map;
+    for (auto it = reacts.constBegin(); it != reacts.constEnd(); ++it) {
+        if (it.value().isEmpty()) {
+            continue;
+        }
+        map.insert(it.key(), QStringList(it.value().constBegin(), it.value().constEnd()));
+    }
+    return map;
+}
 } // namespace
 
 MainWindow::MainWindow(QWidget *parent)
@@ -59,6 +118,7 @@ MainWindow::MainWindow(QWidget *parent)
 
     m_irc = new IrcClient(this);
     connect(m_irc, &IrcClient::channelMessage, this, &MainWindow::onIrcMessage);
+    connect(m_irc, &IrcClient::channelReact, this, &MainWindow::onIrcReact);
     connect(m_irc, &IrcClient::statusMessage, this, &MainWindow::onIrcStatus);
     connect(m_irc, &IrcClient::serverNotice, this, &MainWindow::onIrcStatus);
     connect(m_irc, &IrcClient::errorOccurred, this, &MainWindow::onIrcError);
@@ -337,11 +397,12 @@ void MainWindow::appendChatLog(const QString &displayLine, const QString &nick,
                                const QString &text, const QString &msgid)
 {
     auto *item = new QListWidgetItem(displayLine);
+    item->setData(kRoleBaseLine, displayLine);
     if (!msgid.isEmpty()) {
         item->setData(kRoleMsgId, msgid);
         item->setData(kRoleNick, nick);
         item->setData(kRoleText, text);
-        item->setToolTip(QStringLiteral("Right-click to reply · msgid %1").arg(msgid));
+        item->setToolTip(QStringLiteral("Right-click to reply/react · msgid %1").arg(msgid));
     }
     m_log->addItem(item);
     m_log->scrollToBottom();
@@ -410,25 +471,85 @@ void MainWindow::onLogContextMenu(const QPoint &pos)
     const QString msgid = item->data(kRoleMsgId).toString();
     const QString nick = item->data(kRoleNick).toString();
     const QString text = item->data(kRoleText).toString();
+    const bool haveMsgId = !msgid.isEmpty();
+    const bool connected = m_irc && m_irc->isConnected();
+    const bool canReact = haveMsgId && connected;
 
     QMenu menu(this);
     QAction *replyAct = menu.addAction(QStringLiteral("Reply"));
-    replyAct->setEnabled(!msgid.isEmpty() && m_irc && m_irc->isConnected());
-    if (msgid.isEmpty()) {
+    replyAct->setEnabled(haveMsgId && connected);
+    if (!haveMsgId) {
         replyAct->setText(QStringLiteral("Reply (no msgid)"));
-    } else if (!m_irc || !m_irc->isConnected()) {
+    } else if (!connected) {
         replyAct->setText(QStringLiteral("Reply (not connected)"));
     }
+
+    // React submenu — quick picks like Discord/Slack
+    QMenu *reactMenu = menu.addMenu(QStringLiteral("React"));
+    reactMenu->setEnabled(canReact);
+    static const QStringList kQuickReacts{
+        QStringLiteral("👍"), QStringLiteral("❤️"), QStringLiteral("😂"),
+        QStringLiteral("😮"), QStringLiteral("😢"), QStringLiteral("🎉"),
+        QStringLiteral("🔥"),  QStringLiteral("👏"),  QStringLiteral("❌")};
+    QHash<QString, QAction *> reactActs;
+    for (const QString &emoji : kQuickReacts) {
+        QAction *a = reactMenu->addAction(emoji);
+        reactActs.insert(emoji, a);
+    }
+    reactMenu->addSeparator();
+    QAction *customReactAct = reactMenu->addAction(QStringLiteral("Custom…"));
+
+    menu.addSeparator();
     QAction *copyAct = menu.addAction(QStringLiteral("Copy text"));
+
     QAction *chosen = menu.exec(m_log->mapToGlobal(pos));
-    if (chosen == replyAct && !msgid.isEmpty()) {
-        setReplyTarget(msgid, nick, text.isEmpty() ? item->text() : text);
+    if (!chosen) {
+        return;
+    }
+    if (chosen == replyAct && haveMsgId) {
+        setReplyTarget(
+            msgid, nick,
+            text.isEmpty() ? item->data(kRoleBaseLine).toString() : text);
     } else if (chosen == copyAct) {
-        const QString t = text.isEmpty() ? item->text() : text;
+        const QString t = text.isEmpty() ? (item->data(kRoleBaseLine).toString().isEmpty()
+                                                ? item->text()
+                                                : item->data(kRoleBaseLine).toString())
+                                         : text;
         if (QClipboard *cb = QApplication::clipboard()) {
             cb->setText(t);
         }
         statusBar()->showMessage(QStringLiteral("Copied"), 1500);
+    } else if (canReact) {
+        // Quick emoji
+        for (auto it = reactActs.constBegin(); it != reactActs.constEnd(); ++it) {
+            if (chosen == it.value()) {
+                const QString emoji = it.key();
+                // Optimistic local react (echo-message will confirm).
+                onIrcReact(msgid, emoji, m_irc ? m_irc->nick() : QString{}, false);
+                if (m_irc) {
+                    m_irc->sendChannelReact(msgid, emoji, false);
+                }
+                statusBar()->showMessage(QStringLiteral("Reacted %1").arg(emoji), 1800);
+                return;
+            }
+        }
+        if (chosen == customReactAct) {
+            bool ok = false;
+            const QString customEmoji = QInputDialog::getText(
+                this, QStringLiteral("Custom emoji"), QStringLiteral("Emoji / shortname:"),
+                QLineEdit::Normal, QString(), &ok);
+            if (!ok) {
+                return;
+            }
+            const QString trimmed = customEmoji.trimmed();
+            if (trimmed.isEmpty()) {
+                return;
+            }
+            onIrcReact(msgid, trimmed, m_irc ? m_irc->nick() : QString{}, false);
+            if (m_irc) {
+                m_irc->sendChannelReact(msgid, trimmed, false);
+            }
+        }
     }
 }
 
@@ -783,8 +904,8 @@ void MainWindow::onIrcMessage(const QString &nick, const QString &text,
                     last->setData(kRoleMsgId, msgid);
                     last->setData(kRoleNick, nick);
                     last->setData(kRoleText, text);
-                    last->setToolTip(
-                        QStringLiteral("Right-click to reply · msgid %1").arg(msgid));
+                    last->setToolTip(QStringLiteral("Right-click to reply/react · msgid %1")
+                                         .arg(msgid));
                 }
             }
             return;
@@ -795,8 +916,8 @@ void MainWindow::onIrcMessage(const QString &nick, const QString &text,
                 last->setData(kRoleMsgId, msgid);
                 last->setData(kRoleNick, nick);
                 last->setData(kRoleText, text);
-                last->setToolTip(
-                    QStringLiteral("Right-click to reply · msgid %1").arg(msgid));
+                last->setToolTip(QStringLiteral("Right-click to reply/react · msgid %1")
+                                     .arg(msgid));
             }
         }
         return;
@@ -839,6 +960,78 @@ void MainWindow::onIrcMessage(const QString &nick, const QString &text,
     m_comic->trimToRecentPanels(kMaxComicHistory);
     statusBar()->showMessage(m_comic->statusLine(), 4000);
     QTimer::singleShot(0, this, &MainWindow::syncComicSize);
+}
+
+void MainWindow::onIrcReact(const QString &parentMsgId, const QString &emoji,
+                            const QString &nick, bool remove)
+{
+    if (parentMsgId.isEmpty() || emoji.isEmpty()) {
+        return;
+    }
+    if (!m_log) {
+        return;
+    }
+    auto itemFor = [&](const QString &mid) -> QListWidgetItem * {
+        for (int i = 0; i < m_log->count(); ++i) {
+            if (QListWidgetItem *it = m_log->item(i)) {
+                if (it->data(kRoleMsgId).toString().compare(mid, Qt::CaseInsensitive) == 0) {
+                    return it;
+                }
+            }
+        }
+        return nullptr;
+    };
+
+    QListWidgetItem *it = itemFor(parentMsgId);
+    if (!it) {
+        // Parent may be older than buffer — still stamp on comic if visible.
+        if (m_comic) {
+            const bool hit =
+                m_comic->lookupCachedMessage(parentMsgId, nullptr, nullptr) ||
+                (m_comic && true); // comic may have already trimmed the panel
+            Q_UNUSED(hit);
+            m_comic->applyReact(parentMsgId, emoji, nick, remove);
+        }
+        return;
+    }
+
+    auto reacts = reactsFromItemData(it->data(kRoleReacts));
+    if (remove) {
+        if (reacts.contains(emoji)) {
+            reacts[emoji].remove(nick);
+            if (reacts[emoji].isEmpty()) {
+                reacts.remove(emoji);
+            }
+        }
+    } else {
+        // Toggle semantics: re-react with same emoji removes it.
+        bool wasPresent = reacts.contains(emoji) && reacts[emoji].contains(nick);
+        if (wasPresent) {
+            reacts[emoji].remove(nick);
+            if (reacts[emoji].isEmpty()) {
+                reacts.remove(emoji);
+            }
+        } else {
+            reacts[emoji].insert(nick);
+        }
+    }
+
+    it->setData(kRoleReacts, reactsToItemData(reacts));
+    const QString baseLine = it->data(kRoleBaseLine).toString().isEmpty()
+                                 ? it->text()
+                                 : it->data(kRoleBaseLine).toString();
+    it->setText(formatLogRowWithReacts(baseLine, reacts));
+
+    const QString who = nick.isEmpty() ? QStringLiteral("?") : nick;
+    it->setToolTip(
+        QStringLiteral("Right-click to reply/react · msgid %1 · %2: %3 %4")
+            .arg(it->data(kRoleMsgId).toString(), who, emoji,
+                 remove ? QStringLiteral("(removed)") : QString()));
+
+    if (m_comic) {
+        m_comic->applyReact(parentMsgId, emoji, nick, remove);
+        QTimer::singleShot(0, this, &MainWindow::syncComicSize);
+    }
 }
 
 void MainWindow::onIrcStatus(const QString &msg)

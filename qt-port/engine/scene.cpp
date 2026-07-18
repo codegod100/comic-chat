@@ -940,6 +940,66 @@ void ComicScene::addReplyExchange(const std::string &origNick, const std::string
                " → " + whoReply;
 }
 
+void ComicScene::setMsgIdForLastBalloon(const std::string &nick, const std::string &msgid)
+{
+    if (msgid.empty()) {
+        return;
+    }
+    const std::string key = nickKey(nick);
+    // Walk panels newest→oldest, find the most recent balloon owned by nick
+    // (or matching nick case-insensitively) and stamp it.
+    for (auto it = m_panels.rbegin(); it != m_panels.rend(); ++it) {
+        for (auto &bal : it->balloons) {
+            if (nickKey(bal.nick) == key) {
+                bal.msgid = msgid;
+                return;
+            }
+        }
+    }
+}
+
+bool ComicScene::applyReact(const std::string &targetMsgid, const std::string &emoji,
+                             const std::string &reactorNick, bool remove)
+{
+    if (targetMsgid.empty() || emoji.empty()) {
+        return false;
+    }
+    const std::string who = nickKey(reactorNick);
+    for (auto &panel : m_panels) {
+        for (auto &bal : panel.balloons) {
+            if (bal.msgid == targetMsgid) {
+                auto &list = bal.reacts[emoji];
+                if (remove) {
+                    for (auto n = list.begin(); n != list.end(); ++n) {
+                        if (nickKey(*n) == who) {
+                            list.erase(n);
+                            break;
+                        }
+                    }
+                } else {
+                    // Toggle: if this nick already reacted with this emoji, remove it.
+                    bool found = false;
+                    for (auto n = list.begin(); n != list.end(); ++n) {
+                        if (nickKey(*n) == who) {
+                            list.erase(n);
+                            found = true;
+                            break;
+                        }
+                    }
+                    if (!found) {
+                        list.push_back(reactorNick.empty() ? "you" : reactorNick);
+                    }
+                }
+                if (list.empty()) {
+                    bal.reacts.erase(emoji);
+                }
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
 void ComicScene::drawBody(ICanvas *canvas, const SceneBody &body) const
 {
     auto drawPoseBox = [&](CPose *pose, const RECT &r) {
@@ -1226,6 +1286,44 @@ void ComicScene::drawBalloon(ICanvas *canvas, const SceneBalloon &b) const
         const int x = (b.textBox.left + b.textBox.right - ln.width) / 2;
         canvas->drawText(x, y, ln.text);
         y -= lineH;
+    }
+
+    // ── React badges (freeq emoji reacts) ───────────────────────────────
+    if (!b.reacts.empty()) {
+        const int pillH = std::max(lineH, 150);
+        const int padX = 90;
+        const int gap = 60;
+        const int pillGap = 40;
+        const int badgeTop = Btm - gap;        // just below the balloon
+        const int badgeBot = badgeTop - pillH; // flipped Y: more negative
+
+        canvas->setFont("Sans Serif", std::max(8, m_fontPoint - 1), false);
+        int x = L;
+        for (const auto &pr : b.reacts) {
+            const std::string &emoji = pr.first;
+            const int count = static_cast<int>(pr.second.size());
+            if (count <= 0) {
+                continue;
+            }
+            std::string label = emoji;
+            if (count > 1) {
+                label += " " + std::to_string(count);
+            }
+            const int tw = measureLogical(label);
+            const int pillW = tw + 2 * padX;
+            const int pillL = x;
+            const int pillR = x + pillW;
+
+            canvas->setBrush(CanvasColor::rgb(255, 250, 235));
+            canvas->setPen(CanvasColor::rgb(120, 90, 40), 18);
+            canvas->fillEllipse(
+                RECT{pillL, badgeTop, pillR, badgeBot});
+            canvas->drawEllipse(RECT{pillL, badgeTop, pillR, badgeBot});
+            canvas->setPen(CanvasColor::rgb(60, 40, 10), 1);
+            canvas->drawText(pillL + padX, (badgeTop + badgeBot) / 2 + lineH * 35 / 100,
+                             label);
+            x = pillR + pillGap;
+        }
     }
 }
 

@@ -39,6 +39,12 @@ struct SceneBalloon {
     ComicImage image;
     RECT imageBox{}; // dest rect for photo inside/near balloon
     bool hasImage() const { return !image.isNull(); }
+
+    // freeq message id this balloon represents (for react targeting).
+    std::string msgid;
+    // Emoji reacts grouped by emoji → reactor nicks (preserves add order).
+    // A nick appearing twice with the same emoji = toggle remove (ATProto semantics).
+    std::map<std::string, std::vector<std::string>> reacts;
 };
 
 // Custom body type for external sprites (e.g. rpg.actor idle frames).
@@ -122,6 +128,15 @@ public:
     void addReplyExchange(const std::string &origNick, const std::string &origText,
                           const std::string &replyNick, const std::string &replyText,
                           UCHAR replyMode = SM_SAY);
+
+    // Stamp the server-assigned msgid (echo-message) onto the most recent balloon
+    // for nick, so later +react/+reply can target it.
+    void setMsgIdForLastBalloon(const std::string &nick, const std::string &msgid);
+    // Apply a freeq react to the balloon whose msgid == targetMsgid.
+    // remove=false → toggle (ATProto semantics: re-react removes);
+    // remove=true  → force removal. Returns true if the target balloon exists.
+    bool applyReact(const std::string &targetMsgid, const std::string &emoji,
+                    const std::string &reactorNick, bool remove = false);
 
     // Prefer this image for the nick (rpg.actor sprite). Empty image clears override.
     // Pass a full walk sheet (isSheet=true) with columns/rows for directional facing.

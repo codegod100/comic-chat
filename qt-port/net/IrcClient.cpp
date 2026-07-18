@@ -7,6 +7,7 @@
 #include <QDateTime>
 #include <QJsonDocument>
 #include <QJsonObject>
+#include <QSet>
 #include <QSslSocket>
 #include <QTcpSocket>
 
@@ -207,6 +208,38 @@ void IrcClient::sendTaggedPrivmsg(const QString &target, const QString &text,
     writeLine(QStringLiteral("@%1 PRIVMSG %2 :%3").arg(tagStr, target, text));
 }
 
+void IrcClient::sendChannelReact(const QString &parentMsgId, const QString &emoji, bool remove)
+{
+    if (m_channel.isEmpty() || parentMsgId.trimmed().isEmpty() || emoji.trimmed().isEmpty()) {
+        return;
+    }
+    QHash<QString, QString> tags;
+    tags.insert(QStringLiteral("+reply"), parentMsgId.trimmed());
+    tags.insert(QStringLiteral("+react"), emoji.trimmed());
+    if (remove) {
+        tags.insert(QStringLiteral("+react-remove"), QStringLiteral("1"));
+    }
+    // Prefer TAGMSG when the server advertises it; fall back to empty-body PRIVMSG.
+    // TAGMSG is zero-body — like reply badges elsewhere, it doesn't clutter the stream.
+    // Only advertise TAGMSG if we have the cap (most freeq paths accept it regardless).
+    sendTaggedTagmsg(m_channel, tags);
+}
+
+void IrcClient::sendTaggedTagmsg(const QString &target, const QHash<QString, QString> &tags)
+{
+    if (target.isEmpty() || tags.isEmpty()) {
+        return;
+    }
+    const QString tagStr = formatTagString(tags);
+    if (tagStr.isEmpty()) {
+        return;
+    }
+    // Most freeq / IRCv3 servers accept TAGMSG; if not, some still swallow it.
+    // Emit a TAGMSG; if the server doesn't ack the capability, also try PRIVMSG
+    // with empty body so at least echo-message stamps the parent badge.
+    writeLine(QStringLiteral("@%1 TAGMSG %2").arg(tagStr, target));
+}
+
 QString IrcClient::escapeTagValue(const QString &v)
 {
     // IRCv3: ; → \:  space → \s  \ → \\  CR → \r  LF → \n
@@ -307,12 +340,20 @@ void IrcClient::maybeRequestCaps()
     const QString caps = m_capLsAccum;
     QStringList want;
     // account-tag: freeq attaches account=did:plc:… so we can resolve rpg.actor.
-    const char *desired[] = {"message-tags", "echo-message", "server-time", "batch",
-                             "draft/chathistory", "multi-prefix", "account-notify",
-                             "account-tag", "extended-join"};
+    // draft/message-tags + TAGMSG needed for emoji reacts (zero-body badges).
+    const char *desired[] = {"message-tags", "echo-message", "server-time",
+                             "batch", "draft/chathistory", "multi-prefix",
+                             "account-notify", "account-tag", "extended-join",
+                             "draft/message-tags"};
+    QSet<QString> already;
     for (const char *c : desired) {
-        if (caps.contains(QString::fromLatin1(c), Qt::CaseInsensitive)) {
-            want << QString::fromLatin1(c);
+        const QString cs = QString::fromLatin1(c);
+        if (already.contains(cs)) {
+            continue;
+        }
+        if (caps.contains(cs, Qt::CaseInsensitive)) {
+            want << cs;
+            already.insert(cs);
         }
     }
     if (m_wantSasl && !m_webToken.isEmpty() &&
@@ -785,6 +826,34 @@ void IrcClient::processLine(const QString &line)
         const QString text = params.at(1);
         if (target.compare(m_channel, Qt::CaseInsensitive) == 0 ||
             target.compare(m_nick, Qt::CaseInsensitive) == 0) {
+            // Reacts piggyback on +reply/+react tags. They don't get a log line;
+            // route to channelReact and let the badge attach to the parent msgid.
+            QString parent, emoji, removeVal;
+            bool isRemove = false;
+            for (auto it = tags.constBegin(); it != tags.constEnd(); ++it) {
+                if (it.key() == QLatin1String("+react") ||
+                    it.key() == QLatin1String("react") ||
+                    it.key() == QLatin1String("+draft/react") ||
+                    it.key() == QLatin1String("draft/react")) {
+                    emoji = it.value();
+                } else if (it.key() == QLatin1String("+reply") ||
+                           it.key() == QLatin1String("reply") ||
+                           it.key() == QLatin1String("+draft/reply") ||
+                           it.key() == QLatin1String("draft/reply")) {
+                    parent = it.value();
+                } else if (it.key() == QLatin1String("+react-remove") ||
+                           it.key() == QLatin1String("react-remove") ||
+                           it.key() == QLatin1String("+draft/react-remove") ||
+                           it.key() == QLatin1String("draft/react-remove")) {
+                    removeVal = it.value();
+                    isRemove = true;
+                }
+            }
+            if (!emoji.isEmpty() && !parent.isEmpty()) {
+                emit channelReact(parent, emoji, nick, isRemove);
+                return;
+            }
+
             const QString batchId = tags.value(QStringLiteral("batch"));
             const bool history =
                 m_inHistoryBatch ||
@@ -796,6 +865,39 @@ void IrcClient::processLine(const QString &line)
                 emit channelMessage(nick, QStringLiteral("* %1").arg(action), tags, history);
             } else {
                 emit channelMessage(nick, text, tags, history);
+            }
+        }
+        return;
+    }
+
+    if (cmd == QLatin1String("TAGMSG") && !params.isEmpty()) {
+        QString nick = prefix.section(QLatin1Char('!'), 0, 0);
+        const QString target = params.at(0);
+        if (target.compare(m_channel, Qt::CaseInsensitive) == 0 ||
+            target.compare(m_nick, Qt::CaseInsensitive) == 0) {
+            // TAGMSG carries only tags; body is empty.
+            QString parent, emoji;
+            bool isRemove = false;
+            for (auto it = tags.constBegin(); it != tags.constEnd(); ++it) {
+                if (it.key() == QLatin1String("+react") ||
+                    it.key() == QLatin1String("react") ||
+                    it.key() == QLatin1String("+draft/react") ||
+                    it.key() == QLatin1String("draft/react")) {
+                    emoji = it.value();
+                } else if (it.key() == QLatin1String("+reply") ||
+                           it.key() == QLatin1String("reply") ||
+                           it.key() == QLatin1String("+draft/reply") ||
+                           it.key() == QLatin1String("draft/reply")) {
+                    parent = it.value();
+                } else if (it.key() == QLatin1String("+react-remove") ||
+                           it.key() == QLatin1String("react-remove") ||
+                           it.key() == QLatin1String("+draft/react-remove") ||
+                           it.key() == QLatin1String("draft/react-remove")) {
+                    isRemove = true;
+                }
+            }
+            if (!emoji.isEmpty() && !parent.isEmpty()) {
+                emit channelReact(parent, emoji, nick, isRemove);
             }
         }
         return;

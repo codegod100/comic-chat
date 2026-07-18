@@ -38,6 +38,8 @@ private slots:
     void onLogout();
     void onIrcMessage(const QString &nick, const QString &text,
                       const QHash<QString, QString> &tags, bool history);
+    void onIrcReact(const QString &parentMsgId, const QString &emoji,
+                    const QString &nick, bool remove);
     void onIrcStatus(const QString &msg);
     void onIrcError(const QString &msg);
     void onIrcConnected();

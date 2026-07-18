@@ -310,7 +310,8 @@ QString ComicWidget::stripUrls(const QString &text)
     return out.simplified();
 }
 
-void ComicWidget::fetchAndShowImage(const QUrl &url, const QString &caption, const QString &nick)
+void ComicWidget::fetchAndShowImage(const QUrl &url, const QString &caption,
+                                       const QString &nick, const QString &msgid)
 {
     if (!url.isValid()) {
         return;
@@ -333,7 +334,8 @@ void ComicWidget::fetchAndShowImage(const QUrl &url, const QString &caption, con
 
     QNetworkReply *reply = m_nam.get(req);
     const QString cap = caption;
-    connect(reply, &QNetworkReply::finished, this, [this, reply, who, cap, url, flightKey]() {
+    const QString mid = msgid;
+    connect(reply, &QNetworkReply::finished, this, [this, reply, who, cap, url, flightKey, mid]() {
         reply->deleteLater();
         m_imageFetchInFlight.remove(flightKey);
 
@@ -347,6 +349,9 @@ void ComicWidget::fetchAndShowImage(const QUrl &url, const QString &caption, con
             }
             ensureRpgSprite(who, /*blocking=*/false);
             m_scene.addLine(line.toStdString(), SM_SAY, who.toStdString());
+            if (!mid.isEmpty()) {
+                m_scene.setMsgIdForLastBalloon(who.toStdString(), mid.toStdString());
+            }
             m_scene.trimToMaxPanels(kMaxComicPanels);
             m_imagesShown.insert(flightKey);
             while (m_imagesShown.size() > 64) {
@@ -381,6 +386,9 @@ void ComicWidget::fetchAndShowImage(const QUrl &url, const QString &caption, con
         }
         ensureRpgSprite(who, /*blocking=*/false);
         m_scene.addImageLine(img, cap.toStdString(), SM_SAY, who.toStdString());
+        if (!mid.isEmpty()) {
+            m_scene.setMsgIdForLastBalloon(who.toStdString(), mid.toStdString());
+        }
         m_scene.trimToMaxPanels(kMaxComicPanels);
         m_imagesShown.insert(flightKey);
         while (m_imagesShown.size() > 64) {
@@ -416,6 +424,33 @@ QString ComicWidget::replyParentId(const QHash<QString, QString> &tags)
         }
     }
     return {};
+}
+
+QString ComicWidget::reactEmoji(const QHash<QString, QString> &tags)
+{
+    // freeq react: +react=<emoji> (mirrors +reply). Accept draft/react aliases.
+    static const char *keys[] = {"+react", "react", "+draft/react", "draft/react"};
+    for (const char *k : keys) {
+        const QString v = tags.value(QString::fromLatin1(k));
+        if (!v.isEmpty()) {
+            return v;
+        }
+    }
+    return {};
+}
+
+bool ComicWidget::isReactRemove(const QHash<QString, QString> &tags)
+{
+    // A remove is signalled by +react-remove (or draft/react-remove) being set,
+    // or by +react-remove=<emoji> matching the +react emoji.
+    static const char *keys[] = {"+react-remove", "react-remove", "+draft/react-remove",
+                                 "draft/react-remove"};
+    for (const char *k : keys) {
+        if (tags.contains(QString::fromLatin1(k))) {
+            return true;
+        }
+    }
+    return false;
 }
 
 void ComicWidget::cacheMessage(const QString &msgid, const QString &nick, const QString &text)
@@ -485,6 +520,12 @@ void ComicWidget::rememberIrcMessage(const QString &text, const QString &nick,
     const QString mid = messageId(tags);
     cacheMessage(mid, who, text);
 
+    // Bind the server msgid onto the most recent comic balloon for this nick
+    // so later +react/+reply can target it even if it has scrolled.
+    if (!mid.isEmpty()) {
+        m_scene.setMsgIdForLastBalloon(who.toStdString(), mid.toStdString());
+    }
+
     // Bind local optimistic sends to server msgid (echo-message).
     if (!mid.isEmpty() && !m_pendingOut.isEmpty()) {
         const QString t = text.trimmed();
@@ -520,6 +561,20 @@ void ComicWidget::handlePossiblyMedia(const QString &text, const QString &nick,
     const QString msgid = messageId(tags);
     cacheMessage(msgid, who, text);
 
+    // ── React badge (not a new panel) ───────────────────────────────────
+    // Must come before image / reply handling — a react can arrive with media-*
+    // still set on legacy freeq paths; the emoji badge is the primary UI.
+    const QString reactEm = reactEmoji(tags);
+    const QString parentIdForReact = reactEm.isEmpty() ? QString() : replyParentId(tags);
+    if (!reactEm.isEmpty() && !parentIdForReact.isEmpty()) {
+        // Stamp msgid even if parent not on screen; applyReact failing = parent trimmed.
+        applyReact(parentIdForReact, reactEm, who, isReactRemove(tags));
+        if (!msgid.isEmpty()) {
+            m_scene.setMsgIdForLastBalloon(who.toStdString(), msgid.toStdString());
+        }
+        return;
+    }
+
     // Threaded reply → dedicated panel with original + reply (freeq ReplyBadge UX).
     const QString parentId = replyParentId(tags);
     if (!parentId.isEmpty()) {
@@ -535,6 +590,11 @@ void ComicWidget::handlePossiblyMedia(const QString &text, const QString &nick,
         ensureRpgSprite(who, /*blocking=*/false);
         m_scene.addReplyExchange(origNick.toStdString(), origText.toStdString(),
                                  who.toStdString(), text.toStdString(), SM_SAY);
+        // Stamp msgid onto the reply balloon itself — reacts target this id.
+        if (!msgid.isEmpty()) {
+            m_scene.setMsgIdForLastBalloon(who.toStdString(), msgid.toStdString());
+        }
+        // Also stamp origin-to-parent mapping? Keep parent lookup.
         m_scene.trimToMaxPanels(kMaxComicPanels);
         relayout();
         update();
@@ -559,7 +619,7 @@ void ComicWidget::handlePossiblyMedia(const QString &text, const QString &nick,
             if (alt.isEmpty()) {
                 alt = stripUrls(text);
             }
-            fetchAndShowImage(QUrl(mediaUrl), alt, who);
+            fetchAndShowImage(QUrl(mediaUrl), alt, who, msgid);
         }
         return;
     }
@@ -600,15 +660,33 @@ void ComicWidget::handlePossiblyMedia(const QString &text, const QString &nick,
         // Ensure speaker is on stage with a temporary text panel only if no image
         // yet — fetchAndShowImage adds the photo panel when ready. For join, still
         // kick the download so history media appears shortly after load.
-        fetchAndShowImage(QUrl(mediaUrl), caption, who);
+        fetchAndShowImage(QUrl(mediaUrl), caption, who, msgid);
         return;
     }
 
     // Normal text
     m_scene.addLine(text.toStdString(), SM_SAY, who.toStdString());
+    if (!msgid.isEmpty()) {
+        m_scene.setMsgIdForLastBalloon(who.toStdString(), msgid.toStdString());
+    }
     m_scene.trimToMaxPanels(kMaxComicPanels);
     relayout();
     update();
+}
+
+void ComicWidget::applyReact(const QString &parentMsgid, const QString &emoji,
+                                const QString &reactorNick, bool remove)
+{
+    if (parentMsgid.isEmpty() || emoji.isEmpty()) {
+        return;
+    }
+    const QString who = reactorNick.isEmpty() ? QStringLiteral("you") : reactorNick;
+    const bool hit = m_scene.applyReact(parentMsgid.toStdString(), emoji.toStdString(),
+                                        who.toStdString(), remove);
+    if (hit) {
+        relayout();
+        update();
+    }
 }
 
 void ComicWidget::addChatLine(const QString &text, const QString &nick)

@@ -33,6 +33,10 @@ public:
                             const QHash<QString, QString> &tags);
     // Local send before server msgid: bind later via rememberIrcMessage/echo.
     void noteOutgoingMessage(const QString &text, const QString &nick);
+    // freeq react: stamp emoji badge on the balloon for parentMsgid (comic strip).
+    // remove=true forces removal; remove=false toggles (ATProto semantics).
+    void applyReact(const QString &parentMsgid, const QString &emoji,
+                    const QString &reactorNick, bool remove = false);
     // Look up freeq msgid cache (for log + reply parents).
     bool hasCachedMessage(const QString &msgid) const;
     bool lookupCachedMessage(const QString &msgid, QString *nickOut,
@@ -85,11 +89,15 @@ private:
     // Detect image URL from freeq tags or plain text; start download if needed.
     void handlePossiblyMedia(const QString &text, const QString &nick,
                              const QHash<QString, QString> &tags, bool fastJoin = false);
-    void fetchAndShowImage(const QUrl &url, const QString &caption, const QString &nick);
+    void fetchAndShowImage(const QUrl &url, const QString &caption, const QString &nick,
+                           const QString &msgid = {});
     void cacheMessage(const QString &msgid, const QString &nick, const QString &text);
     // freeq: +reply / draft/reply → parent msgid.
     static QString replyParentId(const QHash<QString, QString> &tags);
     static QString messageId(const QHash<QString, QString> &tags);
+    // freeq react tag: +react / draft/react (emoji or shortname). Empty if none.
+    static QString reactEmoji(const QHash<QString, QString> &tags);
+    static bool isReactRemove(const QHash<QString, QString> &tags);
     static QString extractImageUrl(const QString &text);
     static bool looksLikeImageUrl(const QUrl &url);
     static QString stripUrls(const QString &text);

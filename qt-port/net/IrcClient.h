@@ -40,6 +40,9 @@ public slots:
     void sendChannelReply(const QString &parentMsgId, const QString &text);
     void sendTaggedPrivmsg(const QString &target, const QString &text,
                            const QHash<QString, QString> &tags);
+    // freeq: tag-only react — +reply=<parent msgid>;+react=<emoji> → TAGMSG/empty PRIVMSG.
+    void sendChannelReact(const QString &parentMsgId, const QString &emoji, bool remove = false);
+    void sendTaggedTagmsg(const QString &target, const QHash<QString, QString> &tags);
     // freeq / IRCv3 draft/chathistory — fill msgid cache for +reply parents.
     void requestHistoryLatest(int count = 80);
 
@@ -47,10 +50,13 @@ signals:
     void connected();
     void disconnected();
     void statusMessage(const QString &msg);
-    // tags may include freeq media-url, content-type, media-alt, msgid, +reply, …
-    // history=true for join-replay / CHATHISTORY batches (shown like live chat).
+    // tags may include freeq media-url, content-type, media-alt, msgid, +reply, +react, …
+    // history=true for join-replay / CHATHISTORY batches.
     void channelMessage(const QString &nick, const QString &text,
                         const QHash<QString, QString> &tags, bool history);
+    // freeq react: emoji badge bound to parent msgid, not a new chat line.
+    void channelReact(const QString &parentMsgId, const QString &emoji,
+                      const QString &nick, bool remove);
     void serverNotice(const QString &text);
     void errorOccurred(const QString &msg);
     void saslSucceeded(const QString &did);
