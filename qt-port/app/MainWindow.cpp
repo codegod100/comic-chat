@@ -1022,11 +1022,22 @@ void MainWindow::onIrcReact(const QString &parentMsgId, const QString &emoji,
                                  : it->data(kRoleBaseLine).toString();
     it->setText(formatLogRowWithReacts(baseLine, reacts));
 
-    const QString who = nick.isEmpty() ? QStringLiteral("?") : nick;
-    it->setToolTip(
-        QStringLiteral("Right-click to reply/react · msgid %1 · %2: %3 %4")
-            .arg(it->data(kRoleMsgId).toString(), who, emoji,
-                 remove ? QStringLiteral("(removed)") : QString()));
+    // Build aggregated tooltip: who sent each emoji
+    QStringList tipLines;
+    tipLines << QStringLiteral("msgid %1 — right-click to reply/react").arg(it->data(kRoleMsgId).toString());
+    for (auto itR = reacts.constBegin(); itR != reacts.constEnd(); ++itR) {
+        const QStringList whoList = QStringList(itR.value().constBegin(), itR.value().constEnd());
+        if (whoList.isEmpty()) {
+            continue;
+        }
+        const QString reactors = whoList.join(QStringLiteral(", "));
+        tipLines << QStringLiteral("%1: %2").arg(itR.key(), reactors);
+    }
+    if (remove) {
+        const QString rmWho = nick.isEmpty() ? QStringLiteral("?") : nick;
+        tipLines << QStringLiteral(" — %1 removed %2").arg(rmWho, emoji);
+    }
+    it->setToolTip(tipLines.join(QStringLiteral("\n")));
 
     if (m_comic) {
         m_comic->applyReact(parentMsgId, emoji, nick, remove);

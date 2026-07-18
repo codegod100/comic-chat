@@ -75,6 +75,7 @@ protected:
     void paintEvent(QPaintEvent *event) override;
     void mousePressEvent(QMouseEvent *event) override;
     void mouseMoveEvent(QMouseEvent *event) override;
+    bool event(QEvent *event) override;
     void showEvent(QShowEvent *event) override;
 
 private:
@@ -139,4 +140,13 @@ private:
         QImage fullImage;
     };
     std::vector<ClickableImage> m_clickableImages;
+
+    // React chips hit testing (screen rect → tooltip)
+    struct ClickableReact {
+        QRect screenRect;
+        QString parentMsgid;
+        QString emoji;
+        QStringList reactors; // nicks
+    };
+    std::vector<ClickableReact> m_clickableReacts;
 };

@@ -12,6 +12,7 @@
 #include <QDialog>
 #include <QGuiApplication>
 #include <QHBoxLayout>
+#include <QHelpEvent>
 #include <QLabel>
 #include <QMouseEvent>
 #include <QNetworkReply>
@@ -25,6 +26,7 @@
 #include <QShowEvent>
 #include <QStyle>
 #include <QTimer>
+#include <QToolTip>
 #include <QUrl>
 #include <QVBoxLayout>
 
@@ -850,15 +852,54 @@ void ComicWidget::mouseMoveEvent(QMouseEvent *event)
         QWidget::mouseMoveEvent(event);
         return;
     }
-    bool over = false;
+    bool overImage = false;
     for (const auto &ci : m_clickableImages) {
         if (ci.screenRect.contains(event->pos())) {
-            over = true;
+            overImage = true;
             break;
         }
     }
-    setCursor(over ? Qt::PointingHandCursor : Qt::ArrowCursor);
+    // React chip takes precedence for tooltip text, but keeping arrow cursor
+    // (not hand) so it's not confused with image lightbox.
+    for (const auto &cr : m_clickableReacts) {
+        if (cr.screenRect.contains(event->pos())) {
+            const QString reactors = cr.reactors.join(QStringLiteral(", "));
+            const QString tip = reactors.isEmpty() ? cr.emoji
+                                                   : QStringLiteral("%1: %2").arg(cr.emoji, reactors);
+            setToolTip(tip);
+            setCursor(Qt::ArrowCursor);
+            QWidget::mouseMoveEvent(event);
+            return;
+        }
+    }
+    setCursor(overImage ? Qt::PointingHandCursor : Qt::ArrowCursor);
     QWidget::mouseMoveEvent(event);
+}
+
+bool ComicWidget::event(QEvent *event)
+{
+    if (event && event->type() == QEvent::ToolTip) {
+        auto *help = static_cast<QHelpEvent *>(event);
+        if (help) {
+            for (const auto &cr : m_clickableReacts) {
+                if (cr.screenRect.contains(help->pos())) {
+                    const QString reactors = cr.reactors.join(QStringLiteral(", "));
+                    const QString msgidHint = cr.parentMsgid.isEmpty()
+                                                  ? QString()
+                                                  : QStringLiteral(" (msg %1)").arg(cr.parentMsgid.left(8));
+                    QString tip = cr.emoji;
+                    if (!reactors.isEmpty()) {
+                        tip = QStringLiteral("%1: %2").arg(cr.emoji, reactors);
+                    } else if (cr.emoji.isEmpty()) {
+                        tip = QStringLiteral("reacts%1").arg(msgidHint);
+                    }
+                    QToolTip::showText(help->globalPos(), tip, this);
+                    return true;
+                }
+            }
+        }
+    }
+    return QWidget::event(event);
 }
 
 void ComicWidget::ensureAssetsLoaded()
@@ -950,6 +991,7 @@ void ComicWidget::paintEvent(QPaintEvent *event)
     ensureAssetsLoaded();
 
     m_clickableImages.clear();
+    m_clickableReacts.clear();
 
     QPainter painter(this);
     painter.fillRect(rect(), QColor(0xe8, 0xe4, 0xdc));
@@ -961,7 +1003,7 @@ void ComicWidget::paintEvent(QPaintEvent *event)
     RECT dest{m_margin, m_margin, width() - m_margin, height() - m_margin - statusH};
     m_scene.draw(&canvas, dest);
 
-    // Build hit-test targets for inline image previews.
+    // Build hit-test targets for inline image previews and react chips.
     const int contentH = std::max(1, dest.bottom - dest.top);
     const int side = m_scene.panelSideForHeight(contentH);
     const int y0 = dest.top + std::max(0, (contentH - side) / 2);
@@ -972,6 +1014,7 @@ void ComicWidget::paintEvent(QPaintEvent *event)
                       dest.left + pi * (side + kGap) + side, y0 + side};
         const double sx = double(pr.right - pr.left) / m_scene.unitWidth();
         const double sy = double(pr.bottom - pr.top) / m_scene.unitHeight();
+        // Image boxes
         for (const auto &bal : panels[pi].balloons) {
             if (!bal.hasImage()) {
                 continue;
@@ -984,6 +1027,65 @@ void ComicWidget::paintEvent(QPaintEvent *event)
             const QRect r(screenLeft, screenTop, screenRight - screenLeft,
                           screenBottom - screenTop);
             m_clickableImages.push_back({r, bal.image.qimage()});
+        }
+        // React chip rects — mirror logic in scene.cpp drawBalloon
+        for (const auto &bal : panels[pi].balloons) {
+            if (bal.reacts.empty()) {
+                continue;
+            }
+            const int L = bal.cloudBox.left;
+            const int R = bal.cloudBox.right;
+            const int Btm = bal.cloudBox.bottom;
+            const int chipH = 270;
+            const int padX = 150;
+            const int gapY = 120;
+            const int gap = 90;
+            const int bot = Btm + gapY;
+            const int top = bot + chipH;
+
+            int x = L + 110;
+            for (const auto &prr : bal.reacts) {
+                const std::string &em = prr.first;
+                const int cnt = static_cast<int>(prr.second.size());
+                if (cnt <= 0 || x > R - 100) {
+                    continue;
+                }
+                // Estimate width same as chip drawing: at least 330 plus count text
+                // We use constant 330 here to stay in sync with scene rendering
+                int chipW = 330;
+                // crude bump for big counts
+                if (cnt > 9) {
+                    chipW += 40;
+                }
+                if (cnt > 99) {
+                    chipW += 40;
+                }
+                int l = x;
+                int r = x + chipW;
+                if (r > R - 80) {
+                    r = R - 80;
+                    l = r - chipW;
+                }
+                if (l < L + 40) {
+                    l = L + 40;
+                    r = l + chipW;
+                }
+                const int sl = pr.left + static_cast<int>(std::lround(l * sx));
+                const int sr = pr.left + static_cast<int>(std::lround(r * sx));
+                const int st = pr.top - static_cast<int>(std::lround(top * sy));
+                const int sb = pr.top - static_cast<int>(std::lround(bot * sy));
+                QRect srect(sl, st, sr - sl, sb - st);
+
+                QString emoji = QString::fromStdString(em);
+                QStringList nicks;
+                for (const auto &nn : prr.second) {
+                    nicks << QString::fromStdString(nn);
+                }
+                QString parentId = QString::fromStdString(bal.msgid);
+                m_clickableReacts.push_back({srect, parentId, emoji, nicks});
+
+                x = r + gap;
+            }
         }
     }
 
