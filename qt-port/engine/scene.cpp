@@ -985,6 +985,19 @@ void ComicScene::addImageLine(const ComicImage &image, const std::string &captio
                " speakers, " + std::to_string(m_avatars.size()) + " cast)";
 }
 
+static std::string trimCopy(const std::string &s)
+{
+    size_t a = 0;
+    while (a < s.size() && (s[a] == ' ' || s[a] == '\t' || s[a] == '\n' || s[a] == '\r')) {
+        ++a;
+    }
+    size_t b = s.size();
+    while (b > a && (s[b - 1] == ' ' || s[b - 1] == '\t' || s[b - 1] == '\n' || s[b - 1] == '\r')) {
+        --b;
+    }
+    return s.substr(a, b - a);
+}
+
 void ComicScene::addReplyExchange(const std::string &origNick, const std::string &origText,
                                   const std::string &replyNick, const std::string &replyText,
                                   UCHAR replyMode)
@@ -1029,9 +1042,20 @@ void ComicScene::addReplyExchange(const std::string &origNick, const std::string
     if (!origText.empty()) {
         SceneBalloon orig;
         // Parent is plain speech context; reply balloon is marked SM_REPLY.
+        // Copy parent msgid from an existing on-stage balloon if we already
+        // know it, so reacts to the original still resolve after re-staging.
         orig.text = origText;
         orig.nick = whoOrig;
         orig.mode = SM_SAY;
+        for (auto it = m_panels.rbegin(); it != m_panels.rend() && orig.msgid.empty(); ++it) {
+            for (auto bit = it->balloons.rbegin(); bit != it->balloons.rend(); ++bit) {
+                if (nickKey(bit->nick) == nickKey(whoOrig) &&
+                    trimCopy(bit->text) == trimCopy(origText) && !bit->msgid.empty()) {
+                    orig.msgid = bit->msgid;
+                    break;
+                }
+            }
+        }
         panel.balloons.push_back(std::move(orig));
     }
 
@@ -1049,22 +1073,62 @@ void ComicScene::addReplyExchange(const std::string &origNick, const std::string
                " → " + whoReply;
 }
 
-void ComicScene::setMsgIdForLastBalloon(const std::string &nick, const std::string &msgid)
+bool ComicScene::setMsgIdForLastBalloon(const std::string &nick, const std::string &msgid)
 {
     if (msgid.empty()) {
-        return;
+        return false;
     }
     const std::string key = nickKey(nick);
-    // Walk panels newest→oldest, find the most recent balloon owned by nick
-    // (or matching nick case-insensitively) and stamp it.
+    const std::string midFold = nickKey(msgid);
+
+    // Newest panel first; within a panel, newest balloon first. Prefer empty
+    // msgid so we never re-label an older line (that put reacts on the wrong msg).
     for (auto it = m_panels.rbegin(); it != m_panels.rend(); ++it) {
-        for (auto &bal : it->balloons) {
-            if (nickKey(bal.nick) == key) {
-                bal.msgid = msgid;
-                return;
+        for (auto bit = it->balloons.rbegin(); bit != it->balloons.rend(); ++bit) {
+            if (nickKey(bit->nick) != key) {
+                continue;
+            }
+            if (bit->msgid.empty()) {
+                bit->msgid = msgid;
+                return true;
+            }
+            if (nickKey(bit->msgid) == midFold) {
+                return true; // already correctly stamped
+            }
+            // Different msgid already on this balloon — keep searching older ones
+            // only for an unstamped match; do not overwrite.
+        }
+    }
+    return false;
+}
+
+bool ComicScene::setMsgIdForLastBalloonByText(const std::string &text,
+                                              const std::string &msgid)
+{
+    if (msgid.empty()) {
+        return false;
+    }
+    const std::string want = trimCopy(text);
+    if (want.empty()) {
+        return false;
+    }
+    const std::string midFold = nickKey(msgid);
+
+    for (auto it = m_panels.rbegin(); it != m_panels.rend(); ++it) {
+        for (auto bit = it->balloons.rbegin(); bit != it->balloons.rend(); ++bit) {
+            if (trimCopy(bit->text) != want) {
+                continue;
+            }
+            if (bit->msgid.empty()) {
+                bit->msgid = msgid;
+                return true;
+            }
+            if (nickKey(bit->msgid) == midFold) {
+                return true;
             }
         }
     }
+    return false;
 }
 
 bool ComicScene::applyReact(const std::string &targetMsgid, const std::string &emoji,
@@ -1075,12 +1139,14 @@ bool ComicScene::applyReact(const std::string &targetMsgid, const std::string &e
     }
     const std::string who = nickKey(reactorNick);
     const std::string wantId = nickKey(targetMsgid); // case-fold msgid for freeq
-    for (auto &panel : m_panels) {
-        for (auto &bal : panel.balloons) {
-            if (nickKey(bal.msgid) != wantId) {
+
+    // Newest first so if duplicates ever exist we hit the latest balloon.
+    for (auto pit = m_panels.rbegin(); pit != m_panels.rend(); ++pit) {
+        for (auto bit = pit->balloons.rbegin(); bit != pit->balloons.rend(); ++bit) {
+            if (nickKey(bit->msgid) != wantId) {
                 continue;
             }
-            auto &list = bal.reacts[emoji];
+            auto &list = bit->reacts[emoji];
             if (remove) {
                 for (auto n = list.begin(); n != list.end(); ++n) {
                     if (nickKey(*n) == who) {
@@ -1105,7 +1171,7 @@ bool ComicScene::applyReact(const std::string &targetMsgid, const std::string &e
                 }
             }
             if (list.empty()) {
-                bal.reacts.erase(emoji);
+                bit->reacts.erase(emoji);
             }
             return true;
         }

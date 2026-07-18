@@ -129,9 +129,14 @@ public:
                           const std::string &replyNick, const std::string &replyText,
                           UCHAR replyMode = SM_SAY);
 
-    // Stamp the server-assigned msgid (echo-message) onto the most recent balloon
-    // for nick, so later +react/+reply can target it.
-    void setMsgIdForLastBalloon(const std::string &nick, const std::string &msgid);
+    // Stamp the server-assigned msgid onto the balloon that just spoke.
+    // Prefers the newest balloon for nick with an empty msgid (never overwrites
+    // a different id — that was putting reacts on the wrong message).
+    // Returns true if a balloon was stamped or already had this id.
+    bool setMsgIdForLastBalloon(const std::string &nick, const std::string &msgid);
+    // Fallback when nick forms differ (ATProto handle vs IRC nick on echo):
+    // stamp the newest unstamped balloon whose text matches (trimmed).
+    bool setMsgIdForLastBalloonByText(const std::string &text, const std::string &msgid);
     // Apply a freeq react to the balloon whose msgid == targetMsgid.
     // remove=false → toggle (ATProto semantics: re-react removes);
     // remove=true  → force removal. Returns true if the target balloon exists.

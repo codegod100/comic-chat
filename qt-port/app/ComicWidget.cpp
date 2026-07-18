@@ -522,23 +522,38 @@ void ComicWidget::rememberIrcMessage(const QString &text, const QString &nick,
     const QString mid = messageId(tags);
     cacheMessage(mid, who, text);
 
-    // Bind the server msgid onto the most recent comic balloon for this nick
-    // so later +react/+reply can target it even if it has scrolled.
-    if (!mid.isEmpty()) {
-        m_scene.setMsgIdForLastBalloon(who.toStdString(), mid.toStdString());
+    if (mid.isEmpty()) {
+        return;
     }
 
-    // Bind local optimistic sends to server msgid (echo-message).
-    if (!mid.isEmpty() && !m_pendingOut.isEmpty()) {
-        const QString t = text.trimmed();
+    // Bind server msgid onto the comic balloon for this line.
+    // Optimistic local draws use ATProto handle; echo-message often carries the
+    // IRC nick — so match pending-out by text first, then try all nick forms,
+    // then text-only on unstamped balloons. Never overwrite a different msgid.
+    const QString t = text.trimmed();
+    bool stamped = false;
+    QString pendingNick;
+    if (!m_pendingOut.isEmpty() && !t.isEmpty()) {
         for (int i = 0; i < m_pendingOut.size(); ++i) {
-            if (m_pendingOut.at(i).text == t &&
-                m_pendingOut.at(i).nick.compare(who, Qt::CaseInsensitive) == 0) {
-                m_pendingOut.removeAt(i);
-                break;
+            if (m_pendingOut.at(i).text != t) {
+                continue;
             }
+            // Text match is enough: local send nick may be handle, echo is IRC nick.
+            pendingNick = m_pendingOut.at(i).nick;
+            m_pendingOut.removeAt(i);
+            break;
         }
     }
+    if (!pendingNick.isEmpty()) {
+        stamped = m_scene.setMsgIdForLastBalloon(pendingNick.toStdString(), mid.toStdString());
+    }
+    if (!stamped) {
+        stamped = m_scene.setMsgIdForLastBalloon(who.toStdString(), mid.toStdString());
+    }
+    if (!stamped && !t.isEmpty()) {
+        stamped = m_scene.setMsgIdForLastBalloonByText(t.toStdString(), mid.toStdString());
+    }
+    (void)stamped;
 }
 
 void ComicWidget::handlePossiblyMedia(const QString &text, const QString &nick,
@@ -569,11 +584,9 @@ void ComicWidget::handlePossiblyMedia(const QString &text, const QString &nick,
     const QString reactEm = reactEmoji(tags);
     const QString parentIdForReact = reactEm.isEmpty() ? QString() : replyParentId(tags);
     if (!reactEm.isEmpty() && !parentIdForReact.isEmpty()) {
-        // Stamp msgid even if parent not on screen; applyReact failing = parent trimmed.
+        // Badge only — do NOT stamp the react event's own msgid onto the
+        // reactor's last speech balloon (that re-labeled the wrong message).
         applyReact(parentIdForReact, reactEm, who, isReactRemove(tags));
-        if (!msgid.isEmpty()) {
-            m_scene.setMsgIdForLastBalloon(who.toStdString(), msgid.toStdString());
-        }
         return;
     }
 
