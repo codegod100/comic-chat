@@ -26,16 +26,20 @@ void CPose::drawMasked(ICanvas *canvas, int x, int y, int w, int h, bool flipH) 
         return;
     }
     ComicImage tmp = *m_drawing;
+    // Classic GDI order for a filled figure:
+    //   1) MERGEPAINT silhouette → white body on the backdrop
+    //   2) SRCAND line art     → black ink
+    // Complex faces store the silhouette in m_mask (transOffset).
+    // Simple cast (Connor, …) and many unmasked torsos store it in m_aura
+    // (auraOffset) — same black-inside / white-outside polarity as face masks.
+    // Using pure SRCAND or a leaky flood-fill left bodies hollow / ghostly.
     if (m_mask && !m_mask->isNull()) {
-        // Masked heads/torsos (complex cast): mask silhouette → white skin fill
-        // + black ink. Matches classic MERGEPAINT(mask) then SRCAND(drawing).
         tmp.applyMask(*m_mask);
+    } else if (m_aura && !m_aura->isNull()) {
+        tmp.applyMask(*m_aura);
     } else {
-        // Unmasked poses (simple cast like Connor, and unmasked torsos): pure
-        // SRCAND — black ink stays, white becomes transparent. Do NOT flood-fill
-        // interiors: 1bpp outlines often have diagonal gaps so the fill leaks
-        // and the whole body goes see-through (gray "alpha" haze on the room).
-        tmp.makeWhiteTransparent();
+        // No silhouette in the AVB — best-effort enclosed fill.
+        tmp.fillLineArtInteriors();
     }
     if (flipH && !tmp.isNull()) {
         // Horizontal mirror — classic Comic Chat m_flip / StretchBlt negative width.
