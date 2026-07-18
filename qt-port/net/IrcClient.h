@@ -55,8 +55,9 @@ signals:
     void channelMessage(const QString &nick, const QString &text,
                         const QHash<QString, QString> &tags, bool history);
     // freeq react: emoji badge bound to parent msgid, not a new chat line.
+    // history=true when this arrives inside a CHATHISTORY / JOIN batch.
     void channelReact(const QString &parentMsgId, const QString &emoji,
-                      const QString &nick, bool remove);
+                      const QString &nick, bool remove, bool history);
     void serverNotice(const QString &text);
     void errorOccurred(const QString &msg);
     void saslSucceeded(const QString &did);

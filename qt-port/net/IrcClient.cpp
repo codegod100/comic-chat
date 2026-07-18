@@ -826,9 +826,16 @@ void IrcClient::processLine(const QString &line)
         const QString text = params.at(1);
         if (target.compare(m_channel, Qt::CaseInsensitive) == 0 ||
             target.compare(m_nick, Qt::CaseInsensitive) == 0) {
+            const QString batchId = tags.value(QStringLiteral("batch"));
+            const bool history =
+                m_inHistoryBatch ||
+                (!batchId.isEmpty() &&
+                 (batchId == m_historyBatchId || batchId.startsWith(QLatin1String("hist")) ||
+                  batchId.startsWith(QLatin1String("ch"))));
+
             // Reacts piggyback on +reply/+react tags. They don't get a log line;
             // route to channelReact and let the badge attach to the parent msgid.
-            QString parent, emoji, removeVal;
+            QString parent, emoji;
             bool isRemove = false;
             for (auto it = tags.constBegin(); it != tags.constEnd(); ++it) {
                 if (it.key() == QLatin1String("+react") ||
@@ -845,21 +852,14 @@ void IrcClient::processLine(const QString &line)
                            it.key() == QLatin1String("react-remove") ||
                            it.key() == QLatin1String("+draft/react-remove") ||
                            it.key() == QLatin1String("draft/react-remove")) {
-                    removeVal = it.value();
                     isRemove = true;
                 }
             }
             if (!emoji.isEmpty() && !parent.isEmpty()) {
-                emit channelReact(parent, emoji, nick, isRemove);
+                emit channelReact(parent, emoji, nick, isRemove, history);
                 return;
             }
 
-            const QString batchId = tags.value(QStringLiteral("batch"));
-            const bool history =
-                m_inHistoryBatch ||
-                (!batchId.isEmpty() &&
-                 (batchId == m_historyBatchId || batchId.startsWith(QLatin1String("hist")) ||
-                  batchId.startsWith(QLatin1String("ch"))));
             if (text.startsWith(QLatin1String("\x01""ACTION ")) && text.endsWith(QChar(1))) {
                 QString action = text.mid(8, text.size() - 9);
                 emit channelMessage(nick, QStringLiteral("* %1").arg(action), tags, history);
@@ -875,6 +875,13 @@ void IrcClient::processLine(const QString &line)
         const QString target = params.at(0);
         if (target.compare(m_channel, Qt::CaseInsensitive) == 0 ||
             target.compare(m_nick, Qt::CaseInsensitive) == 0) {
+            const QString batchId = tags.value(QStringLiteral("batch"));
+            const bool history =
+                m_inHistoryBatch ||
+                (!batchId.isEmpty() &&
+                 (batchId == m_historyBatchId || batchId.startsWith(QLatin1String("hist")) ||
+                  batchId.startsWith(QLatin1String("ch"))));
+
             // TAGMSG carries only tags; body is empty.
             QString parent, emoji;
             bool isRemove = false;
@@ -897,7 +904,7 @@ void IrcClient::processLine(const QString &line)
                 }
             }
             if (!emoji.isEmpty() && !parent.isEmpty()) {
-                emit channelReact(parent, emoji, nick, isRemove);
+                emit channelReact(parent, emoji, nick, isRemove, history);
             }
         }
         return;

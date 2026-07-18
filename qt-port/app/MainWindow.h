@@ -39,7 +39,7 @@ private slots:
     void onIrcMessage(const QString &nick, const QString &text,
                       const QHash<QString, QString> &tags, bool history);
     void onIrcReact(const QString &parentMsgId, const QString &emoji,
-                    const QString &nick, bool remove);
+                    const QString &nick, bool remove, bool history);
     void onIrcStatus(const QString &msg);
     void onIrcError(const QString &msg);
     void onIrcConnected();
@@ -110,5 +110,15 @@ private:
     int m_historyComicTotal = 0; // full count before trimming queue
     QTimer *m_historyComicTimer = nullptr;
     bool m_flushingHistoryComic = false;
+
+    // History reacts: may arrive anywhere in BATCH. We queue them and replay
+    // after the main chat history has been flushed so parent msgs exist.
+    struct HistoryReact {
+        QString parentId;
+        QString emoji;
+        QString nick;
+        bool remove = false;
+    };
+    QList<HistoryReact> m_historyReactQueue;
     static constexpr int kMaxComicHistory = 10;
 };

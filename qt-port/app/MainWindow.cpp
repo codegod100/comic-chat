@@ -525,7 +525,8 @@ void MainWindow::onLogContextMenu(const QPoint &pos)
             if (chosen == it.value()) {
                 const QString emoji = it.key();
                 // Optimistic local react (echo-message will confirm).
-                onIrcReact(msgid, emoji, m_irc ? m_irc->nick() : QString{}, false);
+                onIrcReact(msgid, emoji, m_irc ? m_irc->nick() : QString{}, false,
+                           /*history=*/false);
                 if (m_irc) {
                     m_irc->sendChannelReact(msgid, emoji, false);
                 }
@@ -545,7 +546,8 @@ void MainWindow::onLogContextMenu(const QPoint &pos)
             if (trimmed.isEmpty()) {
                 return;
             }
-            onIrcReact(msgid, trimmed, m_irc ? m_irc->nick() : QString{}, false);
+            onIrcReact(msgid, trimmed, m_irc ? m_irc->nick() : QString{}, false,
+                       /*history=*/false);
             if (m_irc) {
                 m_irc->sendChannelReact(msgid, trimmed, false);
             }
@@ -789,6 +791,7 @@ void MainWindow::onChannelJoined(const QString &channel)
 {
     appendLog(QStringLiteral("Joined %1 — loading history…").arg(channel));
     m_historyComicQueue.clear();
+    m_historyReactQueue.clear();
     m_historyComicTotal = 0;
 }
 
@@ -800,55 +803,74 @@ void MainWindow::onHistoryBatchEnded()
 
 void MainWindow::flushHistoryComic()
 {
-    if (m_flushingHistoryComic || !m_comic || m_historyComicQueue.isEmpty()) {
-        return;
+    const bool haveComic = !m_historyComicQueue.isEmpty();
+    const bool haveReacts = !m_historyReactQueue.isEmpty();
+    if (m_flushingHistoryComic || !m_comic || (!haveComic && !haveReacts)) {
+        // If no chat lines but still reacts pending, still need to replay them.
+        if (haveReacts && !m_flushingHistoryComic) {
+            // no chat, just reacts — handle via the same path
+        } else {
+            return;
+        }
     }
     m_flushingHistoryComic = true;
     // Take ownership so nested event loops (rpg.actor HTTP) can't mutate mid-walk.
     const QList<HistoryComicLine> queue = std::move(m_historyComicQueue);
+    const QList<HistoryReact> reactQueue = std::move(m_historyReactQueue);
     m_historyComicQueue.clear();
+    m_historyReactQueue.clear();
 
     if (m_log) {
         m_log->setUpdatesEnabled(true);
         m_log->scrollToBottom();
     }
 
-    // Comic strip: only the last N history messages (log already has the full set).
-    // fastJoin=true: no blocking sprite/media HTTP — panels appear immediately.
-    const int n = queue.size();
-    const int total = std::max(m_historyComicTotal, n);
-    m_historyComicTotal = 0;
-    appendLog(QStringLiteral("Comic strip: showing last %1 of %2 history messages")
-                  .arg(n)
-                  .arg(total));
-    for (int i = 0; i < n; ++i) {
-        const HistoryComicLine &h = queue.at(i);
-        m_comic->addChatLine(h.text, h.nick, h.tags, /*fastJoin=*/true);
-    }
-    m_comic->trimToRecentPanels(kMaxComicHistory);
+    if (!queue.isEmpty()) {
+        // Comic strip: only the last N history messages (log already has the full set).
+        // fastJoin=true: no blocking sprite/media HTTP — panels appear immediately.
+        const int n = queue.size();
+        const int total = std::max(m_historyComicTotal, n);
+        m_historyComicTotal = 0;
+        appendLog(QStringLiteral("Comic strip: showing last %1 of %2 history messages")
+                      .arg(n)
+                      .arg(total));
+        for (int i = 0; i < n; ++i) {
+            const HistoryComicLine &h = queue.at(i);
+            m_comic->addChatLine(h.text, h.nick, h.tags, /*fastJoin=*/true);
+        }
+        m_comic->trimToRecentPanels(kMaxComicHistory);
 
-    // Async rpg.actor upgrade for unique speakers (after UI is responsive).
-    // Also include DIDs from account tags so live fetch can resolve by DID.
-    QSet<QString> nicks;
-    for (int i = 0; i < n; ++i) {
-        const HistoryComicLine &h = queue.at(i);
-        nicks.insert(h.nick);
-        const QString did = h.tags.value(QStringLiteral("account"));
-        if (!did.isEmpty() && did.startsWith(QLatin1String("did:"))) {
-            nicks.insert(did);
-            if (m_comic) {
-                m_comic->rememberAtprotoIdentity(h.nick, did, /*preloadSprite=*/false);
+        // Async rpg.actor upgrade for unique speakers (after UI is responsive).
+        QSet<QString> nicks;
+        for (int i = 0; i < n; ++i) {
+            const HistoryComicLine &h = queue.at(i);
+            nicks.insert(h.nick);
+            const QString did = h.tags.value(QStringLiteral("account"));
+            if (!did.isEmpty() && did.startsWith(QLatin1String("did:"))) {
+                nicks.insert(did);
+                if (m_comic) {
+                    m_comic->rememberAtprotoIdentity(h.nick, did, /*preloadSprite=*/false);
+                }
             }
         }
+        int delay = 0;
+        for (const QString &nick : nicks) {
+            QTimer::singleShot(delay, this, [this, nick]() {
+                if (m_comic) {
+                    m_comic->ensureRpgSpriteAsync(nick);
+                }
+            });
+            delay += 40; // stagger so we don't spike the network all at once
+        }
     }
-    int delay = 0;
-    for (const QString &nick : nicks) {
-        QTimer::singleShot(delay, this, [this, nick]() {
-            if (m_comic) {
-                m_comic->ensureRpgSpriteAsync(nick);
-            }
-        });
-        delay += 40; // stagger so we don't spike the network all at once
+
+    // Replay buffered history reacts — now that all log items and comic panels exist.
+    if (!reactQueue.isEmpty()) {
+        appendLog(QStringLiteral("Applying %1 react(s) from history").arg(reactQueue.size()));
+        for (const HistoryReact &hr : reactQueue) {
+            // Apply without re-queuing as history
+            onIrcReact(hr.parentId, hr.emoji, hr.nick, hr.remove, /*history=*/false);
+        }
     }
 
     m_flushingHistoryComic = false;
@@ -963,11 +985,25 @@ void MainWindow::onIrcMessage(const QString &nick, const QString &text,
 }
 
 void MainWindow::onIrcReact(const QString &parentMsgId, const QString &emoji,
-                            const QString &nick, bool remove)
+                            const QString &nick, bool remove, bool history)
 {
     if (parentMsgId.isEmpty() || emoji.isEmpty()) {
         return;
     }
+    // History: queue until after the main BATCH flush so parents exist in the log/comic.
+    if (history) {
+        // Similar to chat history, keep only recent-ish reacts? No — keep all, filter on replay.
+        m_historyReactQueue.append(HistoryReact{parentMsgId, emoji, nick, remove});
+        // Avoid unbounded growth if server replays huge history (cap ~500).
+        while (m_historyReactQueue.size() > 500) {
+            m_historyReactQueue.removeFirst();
+        }
+        if (m_historyComicTimer) {
+            m_historyComicTimer->start();
+        }
+        return;
+    }
+
     if (!m_log) {
         return;
     }
@@ -984,13 +1020,10 @@ void MainWindow::onIrcReact(const QString &parentMsgId, const QString &emoji,
 
     QListWidgetItem *it = itemFor(parentMsgId);
     if (!it) {
-        // Parent may be older than buffer — still stamp on comic if visible.
+        // Parent not in current log window — still stamp on comic if visible.
         if (m_comic) {
-            const bool hit =
-                m_comic->lookupCachedMessage(parentMsgId, nullptr, nullptr) ||
-                (m_comic && true); // comic may have already trimmed the panel
-            Q_UNUSED(hit);
             m_comic->applyReact(parentMsgId, emoji, nick, remove);
+            QTimer::singleShot(0, this, &MainWindow::syncComicSize);
         }
         return;
     }
