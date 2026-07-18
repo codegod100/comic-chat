@@ -789,6 +789,116 @@ QPixmap ComicWidget::roomThumbnail(const QString &baseName, const QSize &size) c
     return QPixmap::fromImage(cropped);
 }
 
+QStringList ComicWidget::availableCharacters() const
+{
+    QStringList out;
+    for (const auto &n : m_scene.availableAvatarNames()) {
+        out << QString::fromStdString(n);
+    }
+    out.sort(Qt::CaseInsensitive);
+    return out;
+}
+
+bool ComicWidget::setCharacter(const QString &avatarName)
+{
+    const QString want = avatarName.trimmed();
+    if (want.isEmpty()) {
+        return false;
+    }
+    ensureAssetsLoaded();
+    if (!m_assetsOk) {
+        // Remember choice even if avatars not yet loaded
+        m_characterName = want;
+        QSettings s;
+        s.setValue(QStringLiteral("comic/character"), m_characterName);
+        return true;
+    }
+    if (!m_scene.setForcedAvatarForNick("you", want.toStdString())) {
+        // Try as self nicks for immediate visible effect
+        m_loadError = QStringLiteral("Unknown character “%1”").arg(want);
+        update();
+        return false;
+    }
+    m_characterName = want;
+    QSettings s;
+    s.setValue(QStringLiteral("comic/character"), m_characterName);
+    update();
+    return true;
+}
+
+bool ComicWidget::setForcedAvatarForNick(const QString &nick, const QString &avatarName)
+{
+    if (nick.trimmed().isEmpty() || avatarName.trimmed().isEmpty()) {
+        return false;
+    }
+    ensureAssetsLoaded();
+    if (!m_assetsOk) {
+        return false;
+    }
+    const bool ok = m_scene.setForcedAvatarForNick(nick.toStdString(), avatarName.toStdString());
+    if (ok) {
+        update();
+        emit contentResized();
+    }
+    return ok;
+}
+
+bool ComicWidget::clearForcedAvatarForNick(const QString &nick)
+{
+    if (nick.trimmed().isEmpty()) {
+        return false;
+    }
+    ensureAssetsLoaded();
+    if (!m_assetsOk) {
+        return false;
+    }
+    const bool ok = m_scene.clearForcedAvatarForNick(nick.toStdString());
+    if (ok) {
+        update();
+    }
+    return ok;
+}
+
+QPixmap ComicWidget::avatarThumbnail(const QString &avatarName, const QSize &size) const
+{
+    if (avatarName.trimmed().isEmpty() || !size.isValid() || size.isEmpty()) {
+        return {};
+    }
+    if (!m_assetsOk) {
+        return {};
+    }
+    const int idx = m_scene.findAvatarIndexByName(avatarName.toStdString());
+    if (idx < 0) {
+        return {};
+    }
+    // Render the avatar into a thumbnail-sized QImage using the classic
+    // panel-unit coordinate system (UNIT_PANEL_W x UNIT_PANEL_H), scaled to
+    // fit. Same path used by ComicScene::drawPanel for on-stage bodies.
+    QImage img(size, QImage::Format_ARGB32_Premultiplied);
+    img.fill(Qt::white);
+    {
+        QPainter p(&img);
+        p.setRenderHint(QPainter::SmoothPixmapTransform, true);
+        QtCanvas canvas(&p);
+        const int uw = m_scene.unitWidth();
+        const int uh = m_scene.unitHeight();
+        const double sx = double(size.width()) / double(uw);
+        const double sy = double(size.height()) / double(uh);
+        // Square aspect: use uniform scale to avoid stretching the figure.
+        const double s = std::min(sx, sy);
+        canvas.setLogicalScale(s, -s);
+        // Center horizontally; anchor panel bottom near thumbnail bottom.
+        const int ox = int(double(size.width()) / s - double(uw)) / 2;
+        const int oy = int(double(size.height()) / s);
+        canvas.setLogicalOrigin(ox, oy);
+        const RECT client{0, 0, uw, -uh};
+        if (!m_scene.renderAvatarThumbnail(&canvas, idx, client)) {
+            return {};
+        }
+    }
+    return QPixmap::fromImage(img);
+}
+
 QString ComicWidget::statusLine() const
 {
     if (!m_loadError.isEmpty()) {
@@ -983,6 +1093,16 @@ void ComicWidget::ensureAssetsLoaded()
     m_scene.setArt(std::move(cast), backdrop);
     m_assetsOk = true;
     m_loadError.clear();
+
+    // Restore saved character picker choice (if any)
+    {
+        QString savedChar = s.value(QStringLiteral("comic/character")).toString().trimmed();
+        if (!savedChar.isEmpty()) {
+            m_characterName = savedChar;
+            // Pin for common local nick aliases
+            m_scene.setForcedAvatarForNick("you", savedChar.toStdString());
+        }
+    }
 }
 
 void ComicWidget::paintEvent(QPaintEvent *event)

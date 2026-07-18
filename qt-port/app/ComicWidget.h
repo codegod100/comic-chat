@@ -61,6 +61,18 @@ public:
     // Thumbnail for combo/list previews (loads from disk; may be null).
     QPixmap roomThumbnail(const QString &baseName, const QSize &size = QSize(64, 48)) const;
 
+    // Character picker (classic cast). Uses avatar names from comicart/avatars/*.avb
+    QStringList availableCharacters() const;
+    QString currentCharacter() const { return m_characterName; }
+    bool setCharacter(const QString &avatarName);
+    // Pin/unpin avatar to specific nicks (for local self + preserved mapping)
+    bool setForcedAvatarForNick(const QString &nick, const QString &avatarName);
+    bool clearForcedAvatarForNick(const QString &nick);
+
+    // Avatar thumbnail for character selector (renders icon pose).
+    QPixmap avatarThumbnail(const QString &avatarName,
+                            const QSize &size = QSize(64, 64)) const;
+
     void setViewportHeight(int h);
     int viewportHeight() const { return m_viewportH; }
 
@@ -131,6 +143,7 @@ private:
     QString m_loadError;
     QString m_backdropDir;
     QString m_roomName = QStringLiteral("room8bs");
+    QString m_characterName;
     int m_margin = 12;
     int m_viewportH = 400;
 

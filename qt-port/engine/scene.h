@@ -149,6 +149,21 @@ public:
     // Nicks currently drawn in any panel (for deferred sprite upgrades).
     std::vector<std::string> nicksOnStage() const;
 
+    // Character picker: pin nick to a specific cast avatar (by avatar name or index).
+    // Empty avatarName clears the pin (goes back to auto-assign). Returns true on success.
+    bool setForcedAvatarForNick(const std::string &nick, const std::string &avatarName);
+    bool clearForcedAvatarForNick(const std::string &nick);
+    std::string forcedAvatarForNick(const std::string &nick) const;
+    // List of available cast avatar names (same order as art dir).
+    std::vector<std::string> availableAvatarNames() const;
+    int findAvatarIndexByName(const std::string &avatarName) const;
+    // Render a single cast avatar (by index) into canvas with the classic
+    // panel layout + body-draw path. clientRect is in logical panel units
+    // (e.g. {0,0,UNIT_PANEL_W,-UNIT_PANEL_H}); caller sets up scale/origin.
+    // Returns false if the avatar index is invalid or art isn't warm.
+    bool renderAvatarThumbnail(ICanvas *canvas, int avatarIdx,
+                               const RECT &clientRect) const;
+
     int panelCount() const { return static_cast<int>(m_panels.size()); }
     int avatarCount() const { return static_cast<int>(m_avatars.size()); }
     int unitWidth() const { return UNIT_PANEL_W; }
@@ -196,6 +211,7 @@ private:
 
     std::vector<LoadedAvatar> m_avatars;
     std::map<std::string, int> m_nickToAvatar;
+    std::map<std::string, int> m_forcedAvatarByNick; // lower nick → forced avatar index
     struct RpgSpriteOverride {
         ComicImage image;
         std::string label;

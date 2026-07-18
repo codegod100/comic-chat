@@ -53,6 +53,7 @@ private slots:
     void onSessionRefreshed(const FreeqSession &session);
     void syncComicSize();
     void onRoomChanged(int index);
+    void onCharacterChanged(int index);
     void onLogContextMenu(const QPoint &pos);
     void onCancelReply();
 
@@ -65,6 +66,8 @@ private:
     void updateAuthUi();
     void doIrcConnect(const FreeqSession &session);
     void populateRoomSelector();
+    void populateCharacterSelector();
+    void applyCurrentCharacterToLocalNicks();
     void setReplyTarget(const QString &msgid, const QString &nick, const QString &text);
     void clearReplyTarget();
     void updateReplyBanner();
@@ -74,6 +77,7 @@ private:
     QListWidget *m_log = nullptr;
     QLineEdit *m_say = nullptr;
     QComboBox *m_room = nullptr;
+    QComboBox *m_character = nullptr;
     QWidget *m_replyBanner = nullptr;
     QLabel *m_replyLabel = nullptr;
     QPushButton *m_cancelReplyBtn = nullptr;

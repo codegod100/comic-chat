@@ -122,6 +122,17 @@ int ComicScene::assignAvatarIndex(const std::string &nick)
         return -1;
     }
     const std::string key = nickKey(nick);
+
+    // Forced pin from character picker takes precedence over rpg and auto-assign.
+    auto fIt = m_forcedAvatarByNick.find(key);
+    if (fIt != m_forcedAvatarByNick.end()) {
+        int idx = fIt->second;
+        if (idx >= 0 && idx < static_cast<int>(m_avatars.size())) {
+            m_nickToAvatar[key] = idx;
+            return idx;
+        }
+    }
+
     auto it = m_nickToAvatar.find(key);
     if (it != m_nickToAvatar.end()) {
         return it->second;
@@ -253,6 +264,104 @@ std::vector<std::string> ComicScene::nicksOnStage() const
         }
     }
     return out;
+}
+
+int ComicScene::findAvatarIndexByName(const std::string &avatarName) const
+{
+    if (avatarName.empty() || m_avatars.empty()) {
+        return -1;
+    }
+    const std::string want = nickKey(avatarName);
+    for (int i = 0; i < static_cast<int>(m_avatars.size()); ++i) {
+        if (nickKey(m_avatars[static_cast<size_t>(i)].name) == want) {
+            return i;
+        }
+        // Also allow prefix match for convenience (e.g. "anna" vs "anna2")
+        if (m_avatars[static_cast<size_t>(i)].name.rfind(avatarName, 0) == 0) {
+            return i;
+        }
+    }
+    // Fallback case-insensitive substring
+    for (int i = 0; i < static_cast<int>(m_avatars.size()); ++i) {
+        if (nickKey(m_avatars[static_cast<size_t>(i)].name).find(want) != std::string::npos) {
+            return i;
+        }
+    }
+    return -1;
+}
+
+std::vector<std::string> ComicScene::availableAvatarNames() const
+{
+    std::vector<std::string> out;
+    out.reserve(m_avatars.size());
+    for (const auto &av : m_avatars) {
+        out.push_back(av.name);
+    }
+    return out;
+}
+
+bool ComicScene::setForcedAvatarForNick(const std::string &nick, const std::string &avatarName)
+{
+    if (nick.empty() || avatarName.empty()) {
+        return false;
+    }
+    int idx = findAvatarIndexByName(avatarName);
+    if (idx < 0) {
+        return false;
+    }
+    const std::string key = nickKey(nick);
+    m_forcedAvatarByNick[key] = idx;
+    // If nick already has auto assignment, override it now
+    m_nickToAvatar[key] = idx;
+    refreshBodiesForNick(nick);
+    return true;
+}
+
+bool ComicScene::clearForcedAvatarForNick(const std::string &nick)
+{
+    if (nick.empty()) {
+        return false;
+    }
+    const std::string key = nickKey(nick);
+    auto it = m_forcedAvatarByNick.find(key);
+    if (it == m_forcedAvatarByNick.end()) {
+        return false;
+    }
+    m_forcedAvatarByNick.erase(it);
+    // Keep existing assignment? Clear to force re-roll on next message
+    m_nickToAvatar.erase(key);
+    refreshBodiesForNick(nick);
+    return true;
+}
+
+std::string ComicScene::forcedAvatarForNick(const std::string &nick) const
+{
+    const std::string key = nickKey(nick);
+    auto it = m_forcedAvatarByNick.find(key);
+    if (it == m_forcedAvatarByNick.end()) {
+        return {};
+    }
+    if (it->second < 0 || it->second >= static_cast<int>(m_avatars.size())) {
+        return {};
+    }
+    return m_avatars[static_cast<size_t>(it->second)].name;
+}
+
+bool ComicScene::renderAvatarThumbnail(ICanvas *canvas, int avatarIdx,
+                                        const RECT &clientRect) const
+{
+    if (!canvas || avatarIdx < 0 ||
+        avatarIdx >= static_cast<int>(m_avatars.size())) {
+        return false;
+    }
+    const LoadedAvatar &av = m_avatars[static_cast<size_t>(avatarIdx)];
+    if (!warmAvatarPoses(av)) {
+        return false;
+    }
+    SceneBody body = bodyFromAvatar(av, av.name);
+    layoutOneBody(body, clientRect);
+    drawBody(canvas, body);
+    return true;
 }
 
 SceneBody ComicScene::bodyForNick(const std::string &nick)

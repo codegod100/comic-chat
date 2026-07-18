@@ -29,6 +29,7 @@
 #include <QPushButton>
 #include <QScrollArea>
 #include <QScrollBar>
+#include <QSettings>
 #include <QSize>
 #include <QSplitter>
 #include <QStatusBar>
@@ -252,6 +253,12 @@ MainWindow::MainWindow(QWidget *parent)
     connect(m_room, QOverload<int>::of(&QComboBox::currentIndexChanged), this,
             &MainWindow::onRoomChanged);
 
+    m_character = new QComboBox(central);
+    m_character->setMinimumWidth(140);
+    m_character->setToolTip(QStringLiteral("Pick your character (classic avatar)"));
+    connect(m_character, QOverload<int>::of(&QComboBox::currentIndexChanged), this,
+            &MainWindow::onCharacterChanged);
+
     auto *clearBtn = new QPushButton(QStringLiteral("Clear panels"), central);
     connect(clearBtn, &QPushButton::clicked, this, [this]() {
         m_comic->clearPanels();
@@ -262,6 +269,8 @@ MainWindow::MainWindow(QWidget *parent)
 
     row->addWidget(new QLabel(QStringLiteral("Room"), central));
     row->addWidget(m_room);
+    row->addWidget(new QLabel(QStringLiteral("Character"), central));
+    row->addWidget(m_character);
     row->addWidget(m_say, 1);
     row->addWidget(clearBtn);
 
@@ -273,9 +282,10 @@ MainWindow::MainWindow(QWidget *parent)
     setCentralWidget(central);
 
     updateAuthUi();
-    // Fill room list after first layout (art paths resolve relative to app).
+    // Fill selectors after first layout (art paths resolve relative to app).
     QTimer::singleShot(0, this, [this]() {
         populateRoomSelector();
+        populateCharacterSelector();
         syncComicSize();
     });
     statusBar()->showMessage(QStringLiteral("Ready"));
@@ -348,6 +358,126 @@ void MainWindow::onRoomChanged(int index)
     } else {
         appendLog(QStringLiteral("Could not load room “%1”").arg(base));
         statusBar()->showMessage(m_comic->statusLine(), 6000);
+    }
+}
+
+void MainWindow::populateCharacterSelector()
+{
+    if (!m_character || !m_comic) {
+        return;
+    }
+    const QStringList avatars = m_comic->availableCharacters();
+    const QString cur = m_comic->currentCharacter();
+    const QSize thumb(64, 64);
+    m_character->setIconSize(thumb);
+    m_character->blockSignals(true);
+    m_character->clear();
+    // First entry: Auto (no pin) — uses rpg.actor or round-robin
+    m_character->addItem(QStringLiteral("Auto (rpg.actor)"), QString());
+    int curIdx = 0;
+    for (const QString &name : avatars) {
+        const QPixmap pm = m_comic->avatarThumbnail(name, thumb);
+        QString label = name;
+        if (!label.isEmpty()) {
+            label[0] = label[0].toUpper();
+        }
+        if (!pm.isNull()) {
+            m_character->addItem(QIcon(pm), label, name);
+        } else {
+            m_character->addItem(label, name);
+        }
+        if (!cur.isEmpty() && name.compare(cur, Qt::CaseInsensitive) == 0) {
+            curIdx = m_character->count() - 1;
+        }
+    }
+    if (cur.isEmpty()) {
+        m_character->setCurrentIndex(0);
+    } else if (curIdx > 0) {
+        m_character->setCurrentIndex(curIdx);
+    }
+    m_character->blockSignals(false);
+    m_character->setEnabled(m_character->count() > 1);
+}
+
+void MainWindow::applyCurrentCharacterToLocalNicks()
+{
+    if (!m_comic) {
+        return;
+    }
+    const QString charName = m_comic->currentCharacter();
+    if (charName.isEmpty()) {
+        return;
+    }
+    const QStringList localNicks = {
+        QStringLiteral("you"),
+        m_irc ? m_irc->nick() : QString(),
+        m_auth && m_auth->isLoggedIn() ? m_auth->session().displayIdentity() : QString(),
+        m_auth && m_auth->isLoggedIn() ? m_auth->session().handle : QString(),
+        m_auth && m_auth->isLoggedIn() ? m_auth->session().nick : QString(),
+    };
+    for (const QString &nn : localNicks) {
+        if (!nn.isEmpty()) {
+            m_comic->setForcedAvatarForNick(nn, charName);
+        }
+    }
+}
+
+void MainWindow::onCharacterChanged(int index)
+{
+    if (!m_comic || !m_character || index < 0) {
+        return;
+    }
+    const QString avatarName = m_character->itemData(index).toString();
+    if (avatarName.isEmpty()) {
+        // Auto: clear forced pins for local ids
+        const QStringList localNicks = {
+            QStringLiteral("you"),
+            m_irc ? m_irc->nick() : QString(),
+            m_auth && m_auth->isLoggedIn() ? m_auth->session().displayIdentity() : QString(),
+            m_auth && m_auth->isLoggedIn() ? m_auth->session().handle : QString(),
+            m_auth && m_auth->isLoggedIn() ? m_auth->session().nick : QString(),
+        };
+        for (const QString &nn : localNicks) {
+            if (!nn.isEmpty()) {
+                m_comic->clearForcedAvatarForNick(nn);
+            }
+        }
+        appendLog(QStringLiteral("Character: Auto"));
+        statusBar()->showMessage(QStringLiteral("Character → Auto (rpg.actor)"), 3000);
+        QSettings s;
+        s.remove(QStringLiteral("comic/character"));
+        return;
+    }
+
+    // Pin this avatar to all local identities so it sticks regardless of which
+    // nick the server echoes (you / handle / irc nick).
+    const QStringList localNicks = {
+        QStringLiteral("you"),
+        m_irc ? m_irc->nick() : QString(),
+        m_auth && m_auth->isLoggedIn() ? m_auth->session().displayIdentity() : QString(),
+        m_auth && m_auth->isLoggedIn() ? m_auth->session().handle : QString(),
+        m_auth && m_auth->isLoggedIn() ? m_auth->session().nick : QString(),
+    };
+    bool ok = false;
+    for (const QString &nn : localNicks) {
+        if (nn.isEmpty()) {
+            continue;
+        }
+        if (m_comic->setForcedAvatarForNick(nn, avatarName)) {
+            ok = true;
+        }
+    }
+    // Also pin “you” itself via ComicWidget setCharacter (persists)
+    if (m_comic->setCharacter(avatarName)) {
+        ok = true;
+    }
+    if (ok) {
+        appendLog(QStringLiteral("Character: %1").arg(avatarName));
+        statusBar()->showMessage(QStringLiteral("Character → %1").arg(avatarName), 3000);
+        m_comic->update();
+        QTimer::singleShot(0, this, &MainWindow::syncComicSize);
+    } else {
+        appendLog(QStringLiteral("Could not set character “%1”").arg(avatarName));
     }
 }
 
@@ -640,6 +770,8 @@ void MainWindow::onLoginSucceeded(const FreeqSession &session)
                 sess.displayIdentity() != sess.nick) {
                 m_comic->rememberAtprotoIdentity(sess.displayIdentity(), sess.did);
             }
+            // Re-apply chosen character to ATProto identities now known.
+            applyCurrentCharacterToLocalNicks();
             statusBar()->showMessage(m_comic->statusLine(), 4000);
         });
     }
@@ -1095,6 +1227,8 @@ void MainWindow::onIrcConnected()
 {
     setConnectedUi(true);
     appendLog(QStringLiteral("IRC connected."));
+    // The local IRC nick is now known; pin chosen character to it.
+    applyCurrentCharacterToLocalNicks();
 }
 
 void MainWindow::onIrcDisconnected()
