@@ -366,9 +366,15 @@ void MainWindow::populateCharacterSelector()
     if (!m_character || !m_comic) {
         return;
     }
+    // Ensure avatars/poses are loaded (same path as Room selector / first paint).
+    // availableCharacters() is const and does not trigger ensureAssetsLoaded.
+    if (m_comic->availableCharacters().isEmpty()) {
+        m_comic->setRoom(m_comic->currentRoom());
+    }
     const QStringList avatars = m_comic->availableCharacters();
     const QString cur = m_comic->currentCharacter();
-    const QSize thumb(64, 64);
+    // Match room combo icon scale so the dropdown looks consistent.
+    const QSize thumb(48, 64);
     m_character->setIconSize(thumb);
     m_character->blockSignals(true);
     m_character->clear();

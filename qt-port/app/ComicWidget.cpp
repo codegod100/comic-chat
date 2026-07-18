@@ -871,32 +871,87 @@ QPixmap ComicWidget::avatarThumbnail(const QString &avatarName, const QSize &siz
     if (idx < 0) {
         return {};
     }
-    // Render the avatar into a thumbnail-sized QImage using the classic
-    // panel-unit coordinate system (UNIT_PANEL_W x UNIT_PANEL_H), scaled to
-    // fit. Same path used by ComicScene::drawPanel for on-stage bodies.
-    QImage img(size, QImage::Format_ARGB32_Premultiplied);
-    img.fill(Qt::white);
+    // Render large with the same logical transform as ComicScene::drawPanel
+    // (origin top-left, scale (sx,-sy)), then crop to the figure and scale
+    // to fill — same idea as roomThumbnail's KeepAspectRatioByExpanding crop.
+    constexpr int kRender = 256;
+    const QColor paper(245, 240, 230);
+    QImage img(kRender, kRender, QImage::Format_ARGB32_Premultiplied);
+    img.fill(paper);
     {
         QPainter p(&img);
         p.setRenderHint(QPainter::SmoothPixmapTransform, true);
         QtCanvas canvas(&p);
         const int uw = m_scene.unitWidth();
         const int uh = m_scene.unitHeight();
-        const double sx = double(size.width()) / double(uw);
-        const double sy = double(size.height()) / double(uh);
-        // Square aspect: use uniform scale to avoid stretching the figure.
-        const double s = std::min(sx, sy);
+        const double s = double(kRender) / double(uw);
         canvas.setLogicalScale(s, -s);
-        // Center horizontally; anchor panel bottom near thumbnail bottom.
-        const int ox = int(double(size.width()) / s - double(uw)) / 2;
-        const int oy = int(double(size.height()) / s);
-        canvas.setLogicalOrigin(ox, oy);
+        canvas.setLogicalOrigin(0, 0);
         const RECT client{0, 0, uw, -uh};
         if (!m_scene.renderAvatarThumbnail(&canvas, idx, client)) {
             return {};
         }
     }
-    return QPixmap::fromImage(img);
+
+    // Content bbox: anything not the paper fill (line art + skin fill).
+    int minX = kRender, minY = kRender, maxX = -1, maxY = -1;
+    for (int y = 0; y < kRender; ++y) {
+        const QRgb *line = reinterpret_cast<const QRgb *>(img.constScanLine(y));
+        for (int x = 0; x < kRender; ++x) {
+            const QRgb c = line[x];
+            if (qRed(c) < 240 || qGreen(c) < 235 || qBlue(c) < 220) {
+                minX = std::min(minX, x);
+                minY = std::min(minY, y);
+                maxX = std::max(maxX, x);
+                maxY = std::max(maxY, y);
+            }
+        }
+    }
+    if (maxX < minX || maxY < minY) {
+        // Nothing drawn — still return paper so the combo shows an icon slot.
+        return QPixmap::fromImage(
+            img.scaled(size, Qt::IgnoreAspectRatio, Qt::SmoothTransformation));
+    }
+
+    // Pad around the figure, keep square crop so combo icons stay uniform.
+    const int pad = std::max(4, (maxX - minX + maxY - minY) / 16);
+    minX = std::max(0, minX - pad);
+    minY = std::max(0, minY - pad);
+    maxX = std::min(kRender - 1, maxX + pad);
+    maxY = std::min(kRender - 1, maxY + pad);
+    int cw = maxX - minX + 1;
+    int ch = maxY - minY + 1;
+    const int side = std::max(cw, ch);
+    int cx = minX - (side - cw) / 2;
+    int cy = minY - (side - ch) / 2;
+    // Prefer standing on the bottom of the crop (classic body anchor).
+    cy = maxY + 1 - side;
+    if (cx < 0) {
+        cx = 0;
+    }
+    if (cy < 0) {
+        cy = 0;
+    }
+    if (cx + side > kRender) {
+        cx = kRender - side;
+    }
+    if (cy + side > kRender) {
+        cy = kRender - side;
+    }
+
+    QImage cropped = img.copy(cx, cy, side, side);
+    // Expand to target (may letterbox if size is non-square).
+    QImage out(size, QImage::Format_ARGB32_Premultiplied);
+    out.fill(paper);
+    const QImage scaled =
+        cropped.scaled(size, Qt::KeepAspectRatioByExpanding, Qt::SmoothTransformation);
+    const int ox = (scaled.width() - size.width()) / 2;
+    const int oy = (scaled.height() - size.height()) / 2;
+    {
+        QPainter p(&out);
+        p.drawImage(0, 0, scaled, ox, oy, size.width(), size.height());
+    }
+    return QPixmap::fromImage(out);
 }
 
 QString ComicWidget::statusLine() const
