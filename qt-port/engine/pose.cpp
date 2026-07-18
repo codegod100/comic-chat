@@ -27,11 +27,15 @@ void CPose::drawMasked(ICanvas *canvas, int x, int y, int w, int h, bool flipH) 
     }
     ComicImage tmp = *m_drawing;
     if (m_mask && !m_mask->isNull()) {
-        // Masked heads: white skin fill + black ink inside silhouette
+        // Masked heads/torsos (complex cast): mask silhouette → white skin fill
+        // + black ink. Matches classic MERGEPAINT(mask) then SRCAND(drawing).
         tmp.applyMask(*m_mask);
     } else {
-        // Unmasked torsos: white-fill enclosed regions, clear exterior, black ink
-        tmp.fillLineArtInteriors();
+        // Unmasked poses (simple cast like Connor, and unmasked torsos): pure
+        // SRCAND — black ink stays, white becomes transparent. Do NOT flood-fill
+        // interiors: 1bpp outlines often have diagonal gaps so the fill leaks
+        // and the whole body goes see-through (gray "alpha" haze on the room).
+        tmp.makeWhiteTransparent();
     }
     if (flipH && !tmp.isNull()) {
         // Horizontal mirror — classic Comic Chat m_flip / StretchBlt negative width.
