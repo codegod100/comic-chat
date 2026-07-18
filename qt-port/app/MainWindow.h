@@ -71,6 +71,12 @@ private:
     void setReplyTarget(const QString &msgid, const QString &nick, const QString &text);
     void clearReplyTarget();
     void updateReplyBanner();
+    // Self react: optimistic apply + echo-message would toggle twice (remove).
+    // Track short-lived pending keys so the echo is treated as confirmation.
+    bool isLocalReactorNick(const QString &nick) const;
+    void notePendingSelfReact(const QString &parentMsgId, const QString &emoji);
+    bool consumePendingSelfReact(const QString &parentMsgId, const QString &emoji);
+    static QString selfReactKey(const QString &parentMsgId, const QString &emoji);
 
     ComicWidget *m_comic = nullptr;
     QScrollArea *m_comicScroll = nullptr;
@@ -124,5 +130,7 @@ private:
         bool remove = false;
     };
     QList<HistoryReact> m_historyReactQueue;
+    // parentMsgId\nemoji → expiry msecs since epoch (skip matching self echo).
+    QHash<QString, qint64> m_pendingSelfReacts;
     static constexpr int kMaxComicHistory = 10;
 };

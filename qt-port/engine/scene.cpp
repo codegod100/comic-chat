@@ -1074,36 +1074,40 @@ bool ComicScene::applyReact(const std::string &targetMsgid, const std::string &e
         return false;
     }
     const std::string who = nickKey(reactorNick);
+    const std::string wantId = nickKey(targetMsgid); // case-fold msgid for freeq
     for (auto &panel : m_panels) {
         for (auto &bal : panel.balloons) {
-            if (bal.msgid == targetMsgid) {
-                auto &list = bal.reacts[emoji];
-                if (remove) {
-                    for (auto n = list.begin(); n != list.end(); ++n) {
-                        if (nickKey(*n) == who) {
-                            list.erase(n);
-                            break;
-                        }
-                    }
-                } else {
-                    // Toggle: if this nick already reacted with this emoji, remove it.
-                    bool found = false;
-                    for (auto n = list.begin(); n != list.end(); ++n) {
-                        if (nickKey(*n) == who) {
-                            list.erase(n);
-                            found = true;
-                            break;
-                        }
-                    }
-                    if (!found) {
-                        list.push_back(reactorNick.empty() ? "you" : reactorNick);
-                    }
-                }
-                if (list.empty()) {
-                    bal.reacts.erase(emoji);
-                }
-                return true;
+            if (nickKey(bal.msgid) != wantId) {
+                continue;
             }
+            auto &list = bal.reacts[emoji];
+            if (remove) {
+                for (auto n = list.begin(); n != list.end(); ++n) {
+                    if (nickKey(*n) == who) {
+                        list.erase(n);
+                        break;
+                    }
+                }
+            } else {
+                // Toggle: if this nick already reacted with this emoji, remove it.
+                // (Callers that already applied optimistically must suppress the
+                // echo-message re-delivery — see MainWindow::notePendingSelfReact.)
+                bool found = false;
+                for (auto n = list.begin(); n != list.end(); ++n) {
+                    if (nickKey(*n) == who) {
+                        list.erase(n);
+                        found = true;
+                        break;
+                    }
+                }
+                if (!found) {
+                    list.push_back(reactorNick.empty() ? "you" : reactorNick);
+                }
+            }
+            if (list.empty()) {
+                bal.reacts.erase(emoji);
+            }
+            return true;
         }
     }
     return false;

@@ -10,6 +10,7 @@
 #include <QCheckBox>
 #include <QClipboard>
 #include <QComboBox>
+#include <QDateTime>
 #include <QEvent>
 #include <QFrame>
 #include <QGroupBox>
@@ -655,17 +656,38 @@ void MainWindow::onLogContextMenu(const QPoint &pos)
         }
         statusBar()->showMessage(QStringLiteral("Copied"), 1500);
     } else if (canReact) {
+        auto sendLocalReact = [this, msgid, item](const QString &emoji) {
+            if (emoji.isEmpty() || !m_irc) {
+                return;
+            }
+            const QString selfNick = m_irc->nick().isEmpty() ? QStringLiteral("you")
+                                                            : m_irc->nick();
+            // If we already reacted with this emoji, second click = unreact.
+            auto reacts = reactsFromItemData(item->data(kRoleReacts));
+            bool already = false;
+            if (reacts.contains(emoji)) {
+                for (const QString &n : reacts[emoji]) {
+                    if (n.compare(selfNick, Qt::CaseInsensitive) == 0 ||
+                        isLocalReactorNick(n)) {
+                        already = true;
+                        break;
+                    }
+                }
+            }
+            // Apply optimistically first, then mark pending so the echo-message
+            // re-delivery is treated as confirmation (not a second toggle).
+            onIrcReact(msgid, emoji, selfNick, /*remove=*/already, /*history=*/false);
+            notePendingSelfReact(msgid, emoji);
+            m_irc->sendChannelReact(msgid, emoji, already);
+            statusBar()->showMessage(
+                already ? QStringLiteral("Removed %1").arg(emoji)
+                        : QStringLiteral("Reacted %1").arg(emoji),
+                1800);
+        };
         // Quick emoji
         for (auto it = reactActs.constBegin(); it != reactActs.constEnd(); ++it) {
             if (chosen == it.value()) {
-                const QString emoji = it.key();
-                // Optimistic local react (echo-message will confirm).
-                onIrcReact(msgid, emoji, m_irc ? m_irc->nick() : QString{}, false,
-                           /*history=*/false);
-                if (m_irc) {
-                    m_irc->sendChannelReact(msgid, emoji, false);
-                }
-                statusBar()->showMessage(QStringLiteral("Reacted %1").arg(emoji), 1800);
+                sendLocalReact(it.key());
                 return;
             }
         }
@@ -681,11 +703,7 @@ void MainWindow::onLogContextMenu(const QPoint &pos)
             if (trimmed.isEmpty()) {
                 return;
             }
-            onIrcReact(msgid, trimmed, m_irc ? m_irc->nick() : QString{}, false,
-                       /*history=*/false);
-            if (m_irc) {
-                m_irc->sendChannelReact(msgid, trimmed, false);
-            }
+            sendLocalReact(trimmed);
         }
     }
 }
@@ -1121,6 +1139,68 @@ void MainWindow::onIrcMessage(const QString &nick, const QString &text,
     QTimer::singleShot(0, this, &MainWindow::syncComicSize);
 }
 
+QString MainWindow::selfReactKey(const QString &parentMsgId, const QString &emoji)
+{
+    return parentMsgId.trimmed().toLower() + QLatin1Char('\n') + emoji;
+}
+
+bool MainWindow::isLocalReactorNick(const QString &nick) const
+{
+    if (nick.isEmpty()) {
+        return true;
+    }
+    if (m_irc && !m_irc->nick().isEmpty() &&
+        nick.compare(m_irc->nick(), Qt::CaseInsensitive) == 0) {
+        return true;
+    }
+    if (m_auth && m_auth->isLoggedIn()) {
+        const FreeqSession &s = m_auth->session();
+        if (!s.handle.isEmpty() && nick.compare(s.handle, Qt::CaseInsensitive) == 0) {
+            return true;
+        }
+        if (!s.nick.isEmpty() && nick.compare(s.nick, Qt::CaseInsensitive) == 0) {
+            return true;
+        }
+        const QString disp = s.displayIdentity();
+        if (!disp.isEmpty() && nick.compare(disp, Qt::CaseInsensitive) == 0) {
+            return true;
+        }
+    }
+    return false;
+}
+
+void MainWindow::notePendingSelfReact(const QString &parentMsgId, const QString &emoji)
+{
+    if (parentMsgId.isEmpty() || emoji.isEmpty()) {
+        return;
+    }
+    // Echo-message usually arrives within a second; keep a short window.
+    m_pendingSelfReacts.insert(selfReactKey(parentMsgId, emoji),
+                               QDateTime::currentMSecsSinceEpoch() + 8000);
+    // Drop stale entries so the map cannot grow without bound.
+    const qint64 now = QDateTime::currentMSecsSinceEpoch();
+    for (auto it = m_pendingSelfReacts.begin(); it != m_pendingSelfReacts.end();) {
+        if (it.value() < now) {
+            it = m_pendingSelfReacts.erase(it);
+        } else {
+            ++it;
+        }
+    }
+}
+
+bool MainWindow::consumePendingSelfReact(const QString &parentMsgId, const QString &emoji)
+{
+    const QString key = selfReactKey(parentMsgId, emoji);
+    auto it = m_pendingSelfReacts.find(key);
+    if (it == m_pendingSelfReacts.end()) {
+        return false;
+    }
+    const qint64 now = QDateTime::currentMSecsSinceEpoch();
+    const bool fresh = it.value() >= now;
+    m_pendingSelfReacts.erase(it);
+    return fresh;
+}
+
 void MainWindow::onIrcReact(const QString &parentMsgId, const QString &emoji,
                             const QString &nick, bool remove, bool history)
 {
@@ -1141,6 +1221,23 @@ void MainWindow::onIrcReact(const QString &parentMsgId, const QString &emoji,
         return;
     }
 
+    // echo-message re-delivers our own TAGMSG/PRIVMSG react. Optimistic UI already
+    // applied it with toggle semantics — applying again would remove the badge.
+    // Treat matching self-echo as confirmation and skip re-apply.
+    if (isLocalReactorNick(nick) && consumePendingSelfReact(parentMsgId, emoji)) {
+        return;
+    }
+
+    // Canonical reactor label for local user (stable across handle/irc nick forms).
+    QString reactor = nick;
+    if (isLocalReactorNick(nick)) {
+        if (m_irc && !m_irc->nick().isEmpty()) {
+            reactor = m_irc->nick();
+        } else if (reactor.isEmpty()) {
+            reactor = QStringLiteral("you");
+        }
+    }
+
     if (!m_log) {
         return;
     }
@@ -1155,11 +1252,30 @@ void MainWindow::onIrcReact(const QString &parentMsgId, const QString &emoji,
         return nullptr;
     };
 
+    // Case-insensitive membership in the per-emoji nick set.
+    auto setContainsNick = [](const QSet<QString> &set, const QString &n) -> bool {
+        for (const QString &s : set) {
+            if (s.compare(n, Qt::CaseInsensitive) == 0) {
+                return true;
+            }
+        }
+        return false;
+    };
+    auto setRemoveNick = [](QSet<QString> &set, const QString &n) {
+        for (auto it = set.begin(); it != set.end();) {
+            if (it->compare(n, Qt::CaseInsensitive) == 0) {
+                it = set.erase(it);
+            } else {
+                ++it;
+            }
+        }
+    };
+
     QListWidgetItem *it = itemFor(parentMsgId);
     if (!it) {
         // Parent not in current log window — still stamp on comic if visible.
         if (m_comic) {
-            m_comic->applyReact(parentMsgId, emoji, nick, remove);
+            m_comic->applyReact(parentMsgId, emoji, reactor, remove);
             QTimer::singleShot(0, this, &MainWindow::syncComicSize);
         }
         return;
@@ -1168,21 +1284,21 @@ void MainWindow::onIrcReact(const QString &parentMsgId, const QString &emoji,
     auto reacts = reactsFromItemData(it->data(kRoleReacts));
     if (remove) {
         if (reacts.contains(emoji)) {
-            reacts[emoji].remove(nick);
+            setRemoveNick(reacts[emoji], reactor);
             if (reacts[emoji].isEmpty()) {
                 reacts.remove(emoji);
             }
         }
     } else {
         // Toggle semantics: re-react with same emoji removes it.
-        bool wasPresent = reacts.contains(emoji) && reacts[emoji].contains(nick);
+        bool wasPresent = reacts.contains(emoji) && setContainsNick(reacts[emoji], reactor);
         if (wasPresent) {
-            reacts[emoji].remove(nick);
+            setRemoveNick(reacts[emoji], reactor);
             if (reacts[emoji].isEmpty()) {
                 reacts.remove(emoji);
             }
         } else {
-            reacts[emoji].insert(nick);
+            reacts[emoji].insert(reactor);
         }
     }
 
@@ -1204,13 +1320,13 @@ void MainWindow::onIrcReact(const QString &parentMsgId, const QString &emoji,
         tipLines << QStringLiteral("%1: %2").arg(itR.key(), reactors);
     }
     if (remove) {
-        const QString rmWho = nick.isEmpty() ? QStringLiteral("?") : nick;
+        const QString rmWho = reactor.isEmpty() ? QStringLiteral("?") : reactor;
         tipLines << QStringLiteral(" — %1 removed %2").arg(rmWho, emoji);
     }
     it->setToolTip(tipLines.join(QStringLiteral("\n")));
 
     if (m_comic) {
-        m_comic->applyReact(parentMsgId, emoji, nick, remove);
+        m_comic->applyReact(parentMsgId, emoji, reactor, remove);
         QTimer::singleShot(0, this, &MainWindow::syncComicSize);
     }
 }
