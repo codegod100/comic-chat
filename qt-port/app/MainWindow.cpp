@@ -435,7 +435,7 @@ void MainWindow::onCharacterChanged(int index)
     }
     const QString avatarName = m_character->itemData(index).toString();
     if (avatarName.isEmpty()) {
-        // Auto: clear forced pins for local ids
+        // Auto: clear forced pins for local ids + empty-strip character preview
         const QStringList localNicks = {
             QStringLiteral("you"),
             m_irc ? m_irc->nick() : QString(),
@@ -448,10 +448,9 @@ void MainWindow::onCharacterChanged(int index)
                 m_comic->clearForcedAvatarForNick(nn);
             }
         }
+        m_comic->setCharacter(QString()); // clears persisted name + repaints preview
         appendLog(QStringLiteral("Character: Auto"));
         statusBar()->showMessage(QStringLiteral("Character → Auto (rpg.actor)"), 3000);
-        QSettings s;
-        s.remove(QStringLiteral("comic/character"));
         return;
     }
 

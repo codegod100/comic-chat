@@ -1525,9 +1525,21 @@ void ComicScene::draw(ICanvas *canvas, const RECT &dest) const
     }
 
     if (m_panels.empty()) {
-        // Preview the selected room so changing the combo is immediately visible.
+        // Preview the selected room (and character, if pinned) so combo changes
+        // are immediately visible before any chat lines land.
+        ScenePanel preview;
+        {
+            const auto fIt = m_forcedAvatarByNick.find(nickKey("you"));
+            if (fIt != m_forcedAvatarByNick.end() && fIt->second >= 0 &&
+                fIt->second < static_cast<int>(m_avatars.size()) &&
+                warmAvatarPoses(m_avatars[static_cast<size_t>(fIt->second)])) {
+                preview.bodies.push_back(
+                    bodyFromAvatar(m_avatars[static_cast<size_t>(fIt->second)], "you"));
+                self->layoutPanel(preview);
+            }
+        }
         RECT empty{dest.left, y0, dest.left + panelW, y0 + panelH};
-        drawPanel(canvas, ScenePanel{}, empty);
+        drawPanel(canvas, preview, empty);
 
         canvas->save();
         canvas->setLogicalOrigin(0, 0);
@@ -1538,8 +1550,12 @@ void ComicScene::draw(ICanvas *canvas, const RECT &dest) const
         canvas->fillRect(band);
         canvas->setFont("Sans Serif", 11, false);
         canvas->setPen(CanvasColor::rgb(30, 30, 30), 1);
-        canvas->drawText(band.left + 12, band.top + 22,
-                         "Room preview — type below to start chatting.");
+        std::string caption = "Room preview — type below to start chatting.";
+        if (!preview.bodies.empty() && !preview.bodies.front().avatarName.empty()) {
+            caption = "Preview: " + preview.bodies.front().avatarName +
+                      " — type below to start chatting.";
+        }
+        canvas->drawText(band.left + 12, band.top + 22, caption);
         if (!m_status.empty()) {
             canvas->drawText(band.left + 12, band.top + 42, m_status);
         }

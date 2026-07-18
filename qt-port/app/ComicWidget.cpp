@@ -803,7 +803,16 @@ bool ComicWidget::setCharacter(const QString &avatarName)
 {
     const QString want = avatarName.trimmed();
     if (want.isEmpty()) {
-        return false;
+        // Auto: drop pin so empty-strip preview is room-only again.
+        m_characterName.clear();
+        QSettings s;
+        s.remove(QStringLiteral("comic/character"));
+        ensureAssetsLoaded();
+        if (m_assetsOk) {
+            m_scene.clearForcedAvatarForNick("you");
+        }
+        update();
+        return true;
     }
     ensureAssetsLoaded();
     if (!m_assetsOk) {
