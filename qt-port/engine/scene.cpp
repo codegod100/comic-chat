@@ -1289,41 +1289,52 @@ void ComicScene::drawBalloon(ICanvas *canvas, const SceneBalloon &b) const
     }
 
     // ── React badges (freeq emoji reacts) ───────────────────────────────
+    // Chips tucked into the bottom padding of the balloon (not below it —
+    // the tiny circle in the screenshot was the old below-balloon pill
+    // overlapping the tail stub).
     if (!b.reacts.empty()) {
-        const int pillH = std::max(lineH, 150);
-        const int padX = 90;
-        const int gap = 60;
-        const int pillGap = 40;
-        const int badgeTop = Btm - gap;        // just below the balloon
-        const int badgeBot = badgeTop - pillH; // flipped Y: more negative
+        const int chipH = std::max(270, lineH * 110 / 100);
+        const int padX = 150;
+        const int gapY = 120;
+        const int gap = 90;
+        const int bot = Btm + gapY;
+        const int top = bot + chipH;
 
-        canvas->setFont("Sans Serif", std::max(8, m_fontPoint - 1), false);
-        int x = L;
+        canvas->setFont("Sans Serif", std::max(12, m_fontPoint + 1), false);
+        int x = L + 110;
+
         for (const auto &pr : b.reacts) {
             const std::string &emoji = pr.first;
             const int count = static_cast<int>(pr.second.size());
-            if (count <= 0) {
+            if (count <= 0 || x > R - 100) {
                 continue;
             }
             std::string label = emoji;
             if (count > 1) {
-                label += " " + std::to_string(count);
+                label += "  " + std::to_string(count);
             }
             const int tw = measureLogical(label);
-            const int pillW = tw + 2 * padX;
-            const int pillL = x;
-            const int pillR = x + pillW;
-
-            canvas->setBrush(CanvasColor::rgb(255, 250, 235));
-            canvas->setPen(CanvasColor::rgb(120, 90, 40), 18);
-            canvas->fillEllipse(
-                RECT{pillL, badgeTop, pillR, badgeBot});
-            canvas->drawEllipse(RECT{pillL, badgeTop, pillR, badgeBot});
-            canvas->setPen(CanvasColor::rgb(60, 40, 10), 1);
-            canvas->drawText(pillL + padX, (badgeTop + badgeBot) / 2 + lineH * 35 / 100,
-                             label);
-            x = pillR + pillGap;
+            const int chipW = std::max(330, tw + 2 * padX);
+            int l = x;
+            int r = x + chipW;
+            if (r > R - 80) {
+                r = R - 80;
+                l = r - chipW;
+            }
+            if (l < L + 40) {
+                l = L + 40;
+                r = l + chipW;
+            }
+            const RECT chip{l, top, r, bot};
+            canvas->setBrush(CanvasColor::rgb(255, 243, 204));
+            canvas->setPen(CanvasColor::rgb(185, 155, 70), 28);
+            canvas->fillRect(chip);
+            canvas->drawRect(chip);
+            canvas->setPen(CanvasColor::rgb(50, 35, 10), 1);
+            canvas->drawText(l + padX, bot + chipH * 38 / 100, label);
+            x = r + gap;
         }
+        canvas->setFont("Sans Serif", m_fontPoint, false);
     }
 }
 
