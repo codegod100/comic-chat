@@ -1098,12 +1098,13 @@ void ComicScene::layoutPanel(ScenePanel &panel)
     layoutBalloons(panel);
 }
 
-void ComicScene::addLine(const std::string &text, UCHAR mode, const std::string &nick)
+void ComicScene::addLine(const std::string &text, UCHAR mode, const std::string &nick,
+                         const std::string &timestamp)
 {
     if (text.empty()) {
         return;
     }
-    addImageLine(ComicImage{}, text, mode, nick);
+    addImageLine(ComicImage{}, text, mode, nick, timestamp);
 }
 
 void ComicScene::addImageLine(const ComicImage &image, const std::string &caption, UCHAR mode,
@@ -1130,13 +1131,14 @@ void ComicScene::addImageLine(const ComicImage &image, const std::string &captio
     bal.nick = who;
     bal.mode = mode;
     bal.timestamp = timestamp;
+    // Every message gets a readable time (panel footer + photo cards).
+    if (bal.timestamp.empty()) {
+        bal.timestamp = QDateTime::currentDateTime()
+                            .toString(QStringLiteral("MMM d, h:mm AP"))
+                            .toStdString();
+    }
     if (!image.isNull()) {
         bal.image = image;
-        if (bal.timestamp.empty()) {
-            bal.timestamp = QDateTime::currentDateTime()
-                                .toString(QStringLiteral("MMM d, h:mm AP"))
-                                .toStdString();
-        }
     }
 
     // Photos always get their own panel — never merge into a multi-balloon
@@ -1192,7 +1194,7 @@ static std::string trimCopy(const std::string &s)
 
 void ComicScene::addReplyExchange(const std::string &origNick, const std::string &origText,
                                   const std::string &replyNick, const std::string &replyText,
-                                  UCHAR replyMode)
+                                  UCHAR replyMode, const std::string &timestamp)
 {
     if (replyText.empty() && origText.empty()) {
         return;
@@ -1231,6 +1233,12 @@ void ComicScene::addReplyExchange(const std::string &origNick, const std::string
         return;
     }
 
+    const std::string when =
+        timestamp.empty() ? QDateTime::currentDateTime()
+                                .toString(QStringLiteral("MMM d, h:mm AP"))
+                                .toStdString()
+                          : timestamp;
+
     if (!origText.empty()) {
         SceneBalloon orig;
         // Parent is plain speech context; reply balloon is marked SM_REPLY.
@@ -1239,6 +1247,7 @@ void ComicScene::addReplyExchange(const std::string &origNick, const std::string
         orig.text = origText;
         orig.nick = whoOrig;
         orig.mode = SM_SAY;
+        orig.timestamp = when;
         for (auto it = m_panels.rbegin(); it != m_panels.rend() && orig.msgid.empty(); ++it) {
             for (auto bit = it->balloons.rbegin(); bit != it->balloons.rend(); ++bit) {
                 if (nickKey(bit->nick) == nickKey(whoOrig) &&
@@ -1256,6 +1265,7 @@ void ComicScene::addReplyExchange(const std::string &origNick, const std::string
     rep.nick = whoReply;
     (void)replyMode;
     rep.mode = SM_REPLY; // mark reply bubble (not the original)
+    rep.timestamp = when;
     panel.balloons.push_back(std::move(rep));
 
     layoutPanel(panel);
@@ -1777,7 +1787,9 @@ int ComicScene::contentWidthForHeight(int contentHeight) const
 
 int ComicScene::contentHeightForHeight(int contentHeight) const
 {
-    return panelSideForHeight(contentHeight);
+    // Extra strip under each panel for the post-time label.
+    constexpr int kTimestampStrip = 22;
+    return panelSideForHeight(contentHeight) + kTimestampStrip;
 }
 
 void ComicScene::draw(ICanvas *canvas, const RECT &dest) const
@@ -1787,12 +1799,14 @@ void ComicScene::draw(ICanvas *canvas, const RECT &dest) const
     }
 
     constexpr int kGap = 14;
+    constexpr int kTimestampStrip = 22;
     const int contentH = std::max(1, dest.bottom - dest.top);
     const int side = panelSideForHeight(contentH);
     const int panelW = side;
     const int panelH = side;
-    // Vertically center the strip in dest if dest is taller than the panel.
-    const int y0 = dest.top + std::max(0, (contentH - side) / 2);
+    // Leave a strip under the panels for post-time labels, then center.
+    const int y0 =
+        dest.top + std::max(0, (contentH - side - kTimestampStrip) / 2);
 
     auto *self = const_cast<ComicScene *>(this);
     self->m_layoutPxPerTwip = double(panelW) / UNIT_PANEL_W;
@@ -1845,6 +1859,29 @@ void ComicScene::draw(ICanvas *canvas, const RECT &dest) const
     for (const auto &p : m_panels) {
         RECT pr{x, y0, x + panelW, y0 + panelH};
         drawPanel(canvas, p, pr);
+
+        // Post time under the panel (beige strip below the black border).
+        std::string when;
+        for (auto it = p.balloons.rbegin(); it != p.balloons.rend(); ++it) {
+            if (!it->timestamp.empty()) {
+                when = it->timestamp;
+                break;
+            }
+        }
+        if (!when.empty()) {
+            canvas->save();
+            canvas->setLogicalOrigin(0, 0);
+            canvas->setLogicalScale(1.0, 1.0);
+            canvas->resetClip();
+            canvas->setFont("Sans Serif", 10, false);
+            canvas->setPen(CanvasColor::rgb(55, 55, 62), 1);
+            const int tw = canvas->measureTextWidth(when);
+            const int tx = pr.left + std::max(0, (panelW - tw) / 2);
+            const int ty = pr.bottom + 15;
+            canvas->drawText(tx, ty, when);
+            canvas->restore();
+        }
+
         x += panelW + kGap;
     }
 }

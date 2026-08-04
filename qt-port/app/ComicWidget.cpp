@@ -350,7 +350,11 @@ void ComicWidget::fetchAndShowImage(const QUrl &url, const QString &caption,
                 return;
             }
             ensureRpgSprite(who, /*blocking=*/false);
-            m_scene.addLine(line.toStdString(), SM_SAY, who.toStdString());
+            const QString ts =
+                timestamp.isEmpty()
+                    ? QDateTime::currentDateTime().toString(QStringLiteral("MMM d, h:mm AP"))
+                    : timestamp;
+            m_scene.addLine(line.toStdString(), SM_SAY, who.toStdString(), ts.toStdString());
             if (!mid.isEmpty()) {
                 m_scene.setMsgIdForLastBalloon(who.toStdString(), mid.toStdString());
             }
@@ -653,7 +657,8 @@ void ComicWidget::handlePossiblyMedia(const QString &text, const QString &nick,
             ensureRpgSprite(who, /*blocking=*/false);
         }
         m_scene.addReplyExchange(origNick.toStdString(), origText.toStdString(),
-                                 who.toStdString(), text.toStdString(), SM_SAY);
+                                 who.toStdString(), text.toStdString(), SM_SAY,
+                                 formatMessageTime(tags).toStdString());
         // Stamp msgid onto the reply balloon itself — reacts target this id.
         if (!msgid.isEmpty()) {
             m_scene.setMsgIdForLastBalloon(who.toStdString(), msgid.toStdString());
@@ -728,7 +733,8 @@ void ComicWidget::handlePossiblyMedia(const QString &text, const QString &nick,
     }
 
     // Normal text
-    m_scene.addLine(text.toStdString(), SM_SAY, who.toStdString());
+    m_scene.addLine(text.toStdString(), SM_SAY, who.toStdString(),
+                    formatMessageTime(tags).toStdString());
     if (!msgid.isEmpty()) {
         m_scene.setMsgIdForLastBalloon(who.toStdString(), msgid.toStdString());
     }

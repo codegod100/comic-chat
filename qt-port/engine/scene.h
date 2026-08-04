@@ -118,8 +118,9 @@ public:
 
     // Add a spoken line. Nick is mapped to a stable character from the cast.
     // If setRpgSpriteForNick() was called for this nick, that sprite is used.
+    // timestamp: human-readable post time (IRCv3 server-time); drawn under the panel.
     void addLine(const std::string &text, UCHAR mode = SM_SAY,
-                 const std::string &nick = "you");
+                 const std::string &nick = "you", const std::string &timestamp = {});
 
     // Spoken line with an inline image (chat photo / freeq media upload).
     // Caption may be empty; image must be non-null.
@@ -131,7 +132,8 @@ public:
     // origText may be empty if the parent msgid was not in the local cache.
     void addReplyExchange(const std::string &origNick, const std::string &origText,
                           const std::string &replyNick, const std::string &replyText,
-                          UCHAR replyMode = SM_SAY);
+                          UCHAR replyMode = SM_SAY,
+                          const std::string &timestamp = {});
 
     // Stamp the server-assigned msgid onto the balloon that just spoke.
     // Prefers the newest balloon for nick with an empty msgid (never overwrites
