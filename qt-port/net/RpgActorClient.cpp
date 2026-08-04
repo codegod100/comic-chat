@@ -545,6 +545,288 @@ std::optional<RpgSpriteSheet> RpgActorClient::cachedSheetForNick(const QString &
     return std::nullopt;
 }
 
+void RpgActorClient::getBytesAsync(const QUrl &url, int timeoutMs,
+                                   const std::function<void(QByteArray)> &done)
+{
+    if (!url.isValid()) {
+        done({});
+        return;
+    }
+    QNetworkRequest req{url};
+    req.setHeader(QNetworkRequest::UserAgentHeader, QStringLiteral("comic-chat-qt/0.1 (+rpg.actor)"));
+    req.setAttribute(QNetworkRequest::RedirectPolicyAttribute,
+                     QNetworkRequest::NoLessSafeRedirectPolicy);
+
+    QNetworkReply *reply = m_nam.get(req);
+    QTimer *timer = new QTimer(reply);
+    timer->setSingleShot(true);
+    QObject::connect(timer, &QTimer::timeout, reply, [reply]() { reply->abort(); });
+    timer->start(std::max(500, timeoutMs));
+    QObject::connect(reply, &QNetworkReply::finished, this, [reply, done]() {
+        reply->deleteLater();
+        if (reply->error() != QNetworkReply::NoError) {
+            done({});
+            return;
+        }
+        done(reply->readAll());
+    });
+}
+
+void RpgActorClient::finishAsyncSheet(const QString &key, const QString &emitNick,
+                                      const RpgActorRef &ref, const QByteArray &bytes)
+{
+    auto clearFlight = [this, key]() { m_asyncInFlight.remove(key); };
+    if (bytes.isEmpty()) {
+        clearFlight();
+        return;
+    }
+    QImage img;
+    if (!img.loadFromData(bytes)) {
+        clearFlight();
+        return;
+    }
+    RpgSpriteSheet asset;
+    asset.sheet.setQImage(img);
+    asset.columns = ref.columns > 0 ? ref.columns : kDefaultCols;
+    asset.rows = ref.rows > 0 ? ref.rows : kDefaultRows;
+    m_sheetCache.insert(key, asset);
+    if (!ref.spriteUrl.isEmpty()) {
+        m_sheetCache.insert(ref.spriteUrl, asset);
+    }
+    if (!ref.handle.isEmpty()) {
+        m_sheetCache.insert(nickKey(ref.handle), asset);
+    }
+    if (!ref.did.isEmpty()) {
+        m_sheetCache.insert(nickKey(ref.did), asset);
+    }
+    clearFlight();
+    emit spriteReady(emitNick);
+}
+
+void RpgActorClient::asyncDownloadSheet(const QString &key, const QString &emitNick,
+                                        const RpgActorRef &ref)
+{
+    if (ref.spriteUrl.isEmpty()) {
+        m_asyncInFlight.remove(key);
+        return;
+    }
+    getBytesAsync(QUrl(ref.spriteUrl), 6000, [this, key, emitNick, ref](const QByteArray &bytes) {
+        if (!bytes.isEmpty()) {
+            finishAsyncSheet(key, emitNick, ref, bytes);
+            return;
+        }
+        if (ref.did.isEmpty()) {
+            m_asyncInFlight.remove(key);
+            return;
+        }
+        const QString norm = QStringLiteral("https://rpg.actor/api/sprite/normalized?did=%1")
+                                 .arg(QString::fromUtf8(QUrl::toPercentEncoding(ref.did)));
+        getBytesAsync(QUrl(norm), 6000, [this, key, emitNick, ref](const QByteArray &normBytes) {
+            finishAsyncSheet(key, emitNick, ref, normBytes);
+        });
+    });
+}
+
+void RpgActorClient::asyncFetchPdsSprite(const QString &key, const QString &emitNick,
+                                         const QString &did, const QString &handle)
+{
+    if (!did.startsWith(QLatin1String("did:plc:"))) {
+        m_liveMiss.insert(key, true);
+        m_asyncInFlight.remove(key);
+        return;
+    }
+    const QUrl plc(QStringLiteral("https://plc.directory/%1").arg(did));
+    getBytesAsync(plc, 4000, [this, key, emitNick, did, handle](const QByteArray &body) {
+        if (body.isEmpty()) {
+            m_liveMiss.insert(key, true);
+            m_asyncInFlight.remove(key);
+            return;
+        }
+        const QJsonDocument doc = QJsonDocument::fromJson(body);
+        const QJsonArray services = doc.object().value(QStringLiteral("service")).toArray();
+        QString pds;
+        for (const QJsonValue &v : services) {
+            const QJsonObject s = v.toObject();
+            if (s.value(QStringLiteral("id")).toString() == QLatin1String("#atproto_pds") ||
+                s.value(QStringLiteral("type")).toString() ==
+                    QLatin1String("AtprotoPersonalDataServer")) {
+                pds = s.value(QStringLiteral("serviceEndpoint")).toString();
+                break;
+            }
+        }
+        if (pds.isEmpty()) {
+            m_liveMiss.insert(key, true);
+            m_asyncInFlight.remove(key);
+            return;
+        }
+        while (pds.endsWith(QLatin1Char('/'))) {
+            pds.chop(1);
+        }
+        const QUrl listUrl(
+            QStringLiteral("%1/xrpc/com.atproto.repo.listRecords?repo=%2&collection="
+                           "actor.rpg.sprite&limit=5")
+                .arg(pds, QString::fromUtf8(QUrl::toPercentEncoding(did))));
+        getBytesAsync(listUrl, 4000, [this, key, emitNick, did, handle, pds](const QByteArray &listBody) {
+            if (listBody.isEmpty()) {
+                m_liveMiss.insert(key, true);
+                m_asyncInFlight.remove(key);
+                return;
+            }
+            const QJsonDocument doc = QJsonDocument::fromJson(listBody);
+            const QJsonArray records = doc.object().value(QStringLiteral("records")).toArray();
+            if (records.isEmpty()) {
+                m_liveMiss.insert(key, true);
+                m_asyncInFlight.remove(key);
+                return;
+            }
+            QJsonObject value;
+            for (const QJsonValue &v : records) {
+                const QJsonObject rec = v.toObject();
+                const QString uri = rec.value(QStringLiteral("uri")).toString();
+                if (uri.endsWith(QLatin1String("/self"))) {
+                    value = rec.value(QStringLiteral("value")).toObject();
+                    break;
+                }
+                if (value.isEmpty()) {
+                    value = rec.value(QStringLiteral("value")).toObject();
+                }
+            }
+            const QJsonObject sheet = value.value(QStringLiteral("spriteSheet")).toObject();
+            const QString cid =
+                sheet.value(QStringLiteral("ref")).toObject().value(QStringLiteral("$link")).toString();
+            if (cid.isEmpty()) {
+                m_liveMiss.insert(key, true);
+                m_asyncInFlight.remove(key);
+                return;
+            }
+            RpgActorRef ref;
+            ref.did = did;
+            ref.handle = handle;
+            ref.sheetW = value.value(QStringLiteral("width")).toInt(144);
+            ref.sheetH = value.value(QStringLiteral("height")).toInt(192);
+            ref.columns = value.value(QStringLiteral("columns")).toInt(kDefaultCols);
+            ref.rows = value.value(QStringLiteral("rows")).toInt(kDefaultRows);
+            ref.spriteUrl = QStringLiteral("%1/xrpc/com.atproto.sync.getBlob?did=%2&cid=%3")
+                                .arg(pds, QString::fromUtf8(QUrl::toPercentEncoding(did)),
+                                     QString::fromUtf8(QUrl::toPercentEncoding(cid)));
+            ref.hasSprite = true;
+            cacheRef(ref);
+            m_byHandle.insert(key, ref);
+            asyncDownloadSheet(key, emitNick, ref);
+        });
+    });
+}
+
+void RpgActorClient::asyncFetchApiActor(const QString &key, const QString &emitNick,
+                                        const QString &did, const QString &handle)
+{
+    const QUrl apiUrl(QStringLiteral("https://rpg.actor/api/actor/%1")
+                          .arg(QString::fromUtf8(QUrl::toPercentEncoding(did))));
+    getBytesAsync(apiUrl, 4000, [this, key, emitNick, did, handle](const QByteArray &body) {
+        if (!body.isEmpty()) {
+            const QJsonDocument doc = QJsonDocument::fromJson(body);
+            if (doc.isObject() && !doc.object().contains(QStringLiteral("error"))) {
+                const QJsonObject o = doc.object();
+                RpgActorRef ref;
+                ref.did = o.value(QStringLiteral("did")).toString(did);
+                ref.handle = o.value(QStringLiteral("handle")).toString(handle);
+                ref.displayName = o.value(QStringLiteral("displayName")).toString();
+                const QJsonObject sprite = o.value(QStringLiteral("sprite")).toObject();
+                if (!sprite.isEmpty()) {
+                    ref.sheetW = sprite.value(QStringLiteral("width")).toInt(144);
+                    ref.sheetH = sprite.value(QStringLiteral("height")).toInt(192);
+                    ref.columns = sprite.value(QStringLiteral("columns")).toInt(kDefaultCols);
+                    ref.rows = sprite.value(QStringLiteral("rows")).toInt(kDefaultRows);
+                    ref.spriteUrl = sprite.value(QStringLiteral("displayUrl")).toString();
+                    if (ref.spriteUrl.isEmpty()) {
+                        ref.spriteUrl = sprite.value(QStringLiteral("url")).toString();
+                    }
+                    ref.hasSprite = !ref.spriteUrl.isEmpty();
+                }
+                if (ref.hasSprite) {
+                    if (ref.handle.isEmpty()) {
+                        ref.handle = handle;
+                    }
+                    cacheRef(ref);
+                    m_byHandle.insert(key, ref);
+                    asyncDownloadSheet(key, emitNick, ref);
+                    return;
+                }
+            }
+        }
+        asyncFetchPdsSprite(key, emitNick, did, handle);
+    });
+}
+
+void RpgActorClient::requestSpriteAsync(const QString &nick)
+{
+    const QString emitNick = nick.trimmed();
+    const QString key = nickKey(emitNick);
+    if (key.isEmpty()) {
+        return;
+    }
+    if (auto hit = cachedSheetForNick(emitNick)) {
+        emit spriteReady(emitNick);
+        return;
+    }
+    if (m_asyncInFlight.contains(key) || m_liveMiss.value(key, false)) {
+        return;
+    }
+
+    auto ref = lookupKey(key);
+    if (ref && ref->hasSprite && !ref->spriteUrl.isEmpty()) {
+        m_asyncInFlight.insert(key);
+        asyncDownloadSheet(key, emitNick, *ref);
+        return;
+    }
+
+    // Resolve DID (from freeq account tag, or treat key as DID/handle).
+    QString did;
+    QString handle;
+    if (key.startsWith(QLatin1String("did:"))) {
+        did = emitNick.trimmed();
+    } else if (m_nickToDid.contains(key)) {
+        did = m_nickToDid.value(key);
+        handle = key;
+    } else if (key.contains(QLatin1Char('.'))) {
+        // Likely a handle — resolve via Bluesky, then continue.
+        handle = key;
+        m_asyncInFlight.insert(key);
+        QUrl url(QString::fromUtf8(kBskyResolve));
+        QUrlQuery q;
+        q.addQueryItem(QStringLiteral("handle"), handle);
+        url.setQuery(q);
+        getBytesAsync(url, 4000, [this, key, emitNick, handle](const QByteArray &body) {
+            if (body.isEmpty()) {
+                m_liveMiss.insert(key, true);
+                m_asyncInFlight.remove(key);
+                return;
+            }
+            const QString did = QJsonDocument::fromJson(body)
+                                    .object()
+                                    .value(QStringLiteral("did"))
+                                    .toString();
+            if (did.isEmpty()) {
+                m_liveMiss.insert(key, true);
+                m_asyncInFlight.remove(key);
+                return;
+            }
+            m_nickToDid.insert(key, did);
+            asyncFetchApiActor(key, emitNick, did, handle);
+        });
+        return;
+    } else {
+        // Bare IRC nick with no DID — cannot live-resolve.
+        return;
+    }
+
+    if (did.isEmpty()) {
+        return;
+    }
+    m_asyncInFlight.insert(key);
+    asyncFetchApiActor(key, emitNick, did, handle.isEmpty() ? key : handle);
+}
+
 std::optional<RpgSpriteSheet> RpgActorClient::spriteSheetForNick(const QString &nick,
                                                                  int timeoutMs,
                                                                  bool allowLiveFetch)

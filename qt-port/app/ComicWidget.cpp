@@ -121,11 +121,13 @@ ComicWidget::ComicWidget(QWidget *parent)
         update();
     });
     connect(&m_rpg, &RpgActorClient::spriteReady, this, [this](const QString &nick) {
+        m_rpgFetchInFlight.remove(nick.trimmed().toLower());
         // Sheet may have been cached by a parallel path; apply + refresh bodies.
         if (auto sheet = m_rpg.cachedSheetForNick(nick)) {
             applyRpgSheet(nick, *sheet);
             relayout();
             update();
+            emit contentResized();
         }
     });
     m_rpg.refreshRegistry();
@@ -235,20 +237,11 @@ void ComicWidget::ensureRpgSpriteAsync(const QString &nick)
         return;
     }
     m_rpgFetchInFlight.insert(key);
-    // Off the IRC/TLS stack: nested QEventLoop is OK once processLine has returned.
-    QTimer::singleShot(0, this, [this, nick, key]() {
-        if (m_scene.hasRpgSpriteForNick(nick.toStdString())) {
-            m_rpgFetchInFlight.remove(key);
-            return;
-        }
-        auto sheet = m_rpg.spriteSheetForNick(nick, 4000, /*allowLiveFetch=*/true);
-        m_rpgFetchInFlight.remove(key);
-        if (sheet && !sheet->isNull()) {
-            applyRpgSheet(nick, *sheet);
-            update();
-            emit contentResized();
-        }
-    });
+    // True async (QNetworkReply) — never nest QEventLoop on the UI thread.
+    m_rpg.requestSpriteAsync(nick);
+    // Flight flag clears when spriteReady fires or after a short settle window
+    // (request may no-op for bare nicks with no DID).
+    QTimer::singleShot(15000, this, [this, key]() { m_rpgFetchInFlight.remove(key); });
 }
 
 bool ComicWidget::looksLikeImageUrl(const QUrl &url)

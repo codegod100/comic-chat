@@ -561,7 +561,16 @@ void MainWindow::flushHistoryLog()
     }
     m_log->setUpdatesEnabled(false);
     for (const HistoryLogLine &h : m_historyLogQueue) {
-        appendChatLog(h.displayLine, h.nick, h.text, h.msgid);
+        auto *item = new QListWidgetItem(h.displayLine);
+        item->setData(kRoleBaseLine, h.displayLine);
+        if (!h.msgid.isEmpty()) {
+            item->setData(kRoleMsgId, h.msgid);
+            item->setData(kRoleNick, h.nick);
+            item->setData(kRoleText, h.text);
+            item->setToolTip(
+                QStringLiteral("Right-click to reply/react · msgid %1").arg(h.msgid));
+        }
+        m_log->addItem(item);
     }
     m_historyLogQueue.clear();
     m_log->setUpdatesEnabled(true);
@@ -868,15 +877,18 @@ void MainWindow::onLoginSucceeded(const FreeqSession &session)
                 return;
             }
             if (!sess.handle.isEmpty()) {
-                m_comic->rememberAtprotoIdentity(sess.handle, sess.did);
+                m_comic->rememberAtprotoIdentity(sess.handle, sess.did,
+                                                 /*preloadSprite=*/false);
             }
             if (!sess.nick.isEmpty() && sess.nick != sess.handle) {
-                m_comic->rememberAtprotoIdentity(sess.nick, sess.did);
+                m_comic->rememberAtprotoIdentity(sess.nick, sess.did,
+                                                 /*preloadSprite=*/false);
             }
             if (!sess.displayIdentity().isEmpty() &&
                 sess.displayIdentity() != sess.handle &&
                 sess.displayIdentity() != sess.nick) {
-                m_comic->rememberAtprotoIdentity(sess.displayIdentity(), sess.did);
+                m_comic->rememberAtprotoIdentity(sess.displayIdentity(), sess.did,
+                                                 /*preloadSprite=*/false);
             }
             // Re-apply chosen character to ATProto identities now known.
             applyCurrentCharacterToLocalNicks();
@@ -936,12 +948,14 @@ void MainWindow::doIrcConnect(const FreeqSession &session)
         appendLog(QStringLiteral("Connecting as guest (no web-token)…"));
     }
 
-    // rpg.actor: index IRC nick + handle → DID before chat starts.
+    // rpg.actor: index IRC nick + handle → DID only (no sprite HTTP on connect —
+    // nested downloads freeze the UI while history floods in).
     if (m_comic && !session.did.isEmpty()) {
-        m_comic->rememberAtprotoIdentity(nick, session.did);
+        m_comic->rememberAtprotoIdentity(nick, session.did, /*preloadSprite=*/false);
         if (!session.handle.isEmpty() &&
             session.handle.compare(nick, Qt::CaseInsensitive) != 0) {
-            m_comic->rememberAtprotoIdentity(session.handle, session.did);
+            m_comic->rememberAtprotoIdentity(session.handle, session.did,
+                                             /*preloadSprite=*/false);
         }
     }
 

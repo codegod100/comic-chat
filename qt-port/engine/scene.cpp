@@ -653,18 +653,22 @@ void ComicScene::layoutBalloon(SceneBalloon &b, const SceneBody &body, int /*bal
         b.imageBox.top = b.cloudBox.top - kFramePad;
         b.imageBox.bottom = b.imageBox.top - imgH;
 
-        b.textBox.left = b.imageBox.left;
-        b.textBox.right = b.imageBox.right;
-        b.textBox.bottom = b.cloudBox.bottom + kFramePad / 2;
-        b.textBox.top = b.textBox.bottom + captionH;
+        // Stack: image → timestamp → caption (nick + lines). Panel Y: top > bottom.
         if (!b.timestamp.empty()) {
-            b.textBox.top += timestampH;
             b.timeBox.left = b.imageBox.left;
             b.timeBox.right = b.imageBox.right;
             b.timeBox.top = b.imageBox.bottom - padY / 4;
             b.timeBox.bottom = b.timeBox.top - timestampH;
+            b.textBox.left = b.imageBox.left;
+            b.textBox.right = b.imageBox.right;
+            b.textBox.top = b.timeBox.bottom;
+            b.textBox.bottom = b.textBox.top - captionH;
         } else {
             b.timeBox = {};
+            b.textBox.left = b.imageBox.left;
+            b.textBox.right = b.imageBox.right;
+            b.textBox.bottom = b.cloudBox.bottom + kFramePad / 2;
+            b.textBox.top = b.textBox.bottom + captionH;
         }
         return;
     }
@@ -1489,7 +1493,7 @@ void ComicScene::drawBalloon(ICanvas *canvas, const SceneBalloon &b) const
             b.image.draw(canvas, imgLeft, imgBottom, diw, dih);
         }
 
-        // Timestamp on the footer row directly under the image bitmap.
+        // Timestamp directly under the image (caption must start below this).
         if (!b.timestamp.empty()) {
             canvas->setFont("Sans Serif", std::max(7, m_fontPoint - 2), false);
             canvas->setPen(CanvasColor::rgb(70, 70, 82), 1);
@@ -1497,9 +1501,10 @@ void ComicScene::drawBalloon(ICanvas *canvas, const SceneBalloon &b) const
             const int ty = b.timeBox.top - lineH;
             canvas->drawText((L + R - tw) / 2, ty, b.timestamp);
         }
+        // Caption under the timestamp (or under the image when no timestamp).
         canvas->setFont("Sans Serif", m_fontPoint, false);
         canvas->setPen(CanvasColor::rgb(0, 0, 0), 1);
-        int y = b.imageBox.bottom - lineH;
+        int y = (b.timestamp.empty() ? b.imageBox.bottom : b.timeBox.bottom) - lineH;
         const int yMin = Btm + lineH;
         if (!b.nick.empty()) {
             canvas->setFont("Sans Serif", std::max(8, m_fontPoint - 1), true);
