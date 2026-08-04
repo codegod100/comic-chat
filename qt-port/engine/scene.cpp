@@ -1226,7 +1226,7 @@ void ComicScene::drawBody(ICanvas *canvas, const SceneBody &body) const
             // Sheet directions are real art — do not mirror.
         } else if (body.flip && !frame.isNull()) {
             // Single-frame custom art: mirror like classic cast.
-            frame.qimage() = frame.qimage().flipped(Qt::Horizontal);
+            frame.qimage() = frame.qimage().mirrored(true, false);
         }
         frame.draw(canvas, body.box.left, body.box.bottom, w, h);
         return;
