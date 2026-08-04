@@ -320,6 +320,10 @@ void ComicWidget::fetchAndShowImage(const QUrl &url, const QString &caption,
     if (!url.isValid()) {
         return;
     }
+    if (m_panelBatchDepth > 0) {
+        m_deferredImageFetches.append({url, caption, nick, msgid, timestamp});
+        return;
+    }
     // One panel per (url, nick) — history/live can otherwise fire the same fetch
     // multiple times and stamp the photo onto many frames.
     const QString who = nick.isEmpty() ? QStringLiteral("you") : nick;
@@ -620,7 +624,9 @@ void ComicWidget::handlePossiblyMedia(const QString &text, const QString &nick,
         m_rpg.rememberDidForNick(who, accountDid);
     }
     // History join: never block on HTTP. Live: async upgrade (cache hit is instant).
-    ensureRpgSprite(who, /*blocking=*/false);
+    if (!fastJoin) {
+        ensureRpgSprite(who, /*blocking=*/false);
+    }
 
     // freeq: remember every line by msgid so later +reply can re-stage the original.
     const QString msgid = messageId(tags);
@@ -647,10 +653,12 @@ void ComicWidget::handlePossiblyMedia(const QString &text, const QString &nick,
             origNick = QStringLiteral("?");
             origText = QStringLiteral("(original not in buffer)");
         }
-        if (origNick != QLatin1String("?")) {
+        if (origNick != QLatin1String("?") && !fastJoin) {
             ensureRpgSprite(origNick, /*blocking=*/false);
         }
-        ensureRpgSprite(who, /*blocking=*/false);
+        if (!fastJoin) {
+            ensureRpgSprite(who, /*blocking=*/false);
+        }
         m_scene.addReplyExchange(origNick.toStdString(), origText.toStdString(),
                                  who.toStdString(), text.toStdString(), SM_SAY);
         // Stamp msgid onto the reply balloon itself — reacts target this id.
@@ -754,8 +762,13 @@ void ComicWidget::endPanelBatch()
         --m_panelBatchDepth;
     }
     if (m_panelBatchDepth == 0) {
+        const QList<PendingImageFetch> pending = std::move(m_deferredImageFetches);
+        m_deferredImageFetches.clear();
         relayout();
         update();
+        for (const PendingImageFetch &p : pending) {
+            fetchAndShowImage(p.url, p.caption, p.nick, p.msgid, p.timestamp);
+        }
     }
 }
 
@@ -768,7 +781,7 @@ void ComicWidget::applyReact(const QString &parentMsgid, const QString &emoji,
     const QString who = reactorNick.isEmpty() ? QStringLiteral("you") : reactorNick;
     const bool hit = m_scene.applyReact(parentMsgid.toStdString(), emoji.toStdString(),
                                         who.toStdString(), remove);
-    if (hit) {
+    if (hit && m_panelBatchDepth == 0) {
         relayout();
         update();
     }

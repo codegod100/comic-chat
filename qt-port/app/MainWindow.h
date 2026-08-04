@@ -63,6 +63,9 @@ private:
     // Chat line in the log with freeq msgid for right-click → Reply.
     void appendChatLog(const QString &displayLine, const QString &nick, const QString &text,
                        const QString &msgid);
+    void queueHistoryLog(const QString &displayLine, const QString &nick, const QString &text,
+                         const QString &msgid);
+    void flushHistoryLog();
     void setConnectedUi(bool on);
     void updateAuthUi();
     void doIrcConnect(const FreeqSession &session);
@@ -112,6 +115,13 @@ private:
     QString m_replyText;
 
     // History lines: log shows all; comic only flushes the last kMaxComicHistory.
+    struct HistoryLogLine {
+        QString displayLine;
+        QString nick;
+        QString text;
+        QString msgid;
+    };
+    QList<HistoryLogLine> m_historyLogQueue;
     struct HistoryComicLine {
         QString nick;
         QString text;

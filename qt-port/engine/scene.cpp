@@ -7,6 +7,7 @@
 
 #include <QFont>
 #include <QFontMetrics>
+#include <QDateTime>
 
 #include <algorithm>
 #include <cmath>
@@ -613,7 +614,7 @@ void ComicScene::layoutBalloon(SceneBalloon &b, const SceneBody &body, int /*bal
         b.lines = wrapText(b.text, imgW);
 
         const int totalW = imgW + 2 * kFramePad;
-        const int totalH = imgH + 2 * kFramePad + captionH;
+        const int totalH = imgH + chromeH;
 
         int cx = body.arrowX;
         cx = std::max(totalW / 2 + kSideMargin,
@@ -1107,6 +1108,11 @@ void ComicScene::addImageLine(const ComicImage &image, const std::string &captio
     bal.timestamp = timestamp;
     if (!image.isNull()) {
         bal.image = image;
+        if (bal.timestamp.empty()) {
+            bal.timestamp = QDateTime::currentDateTime()
+                                .toString(QStringLiteral("MMM d, h:mm AP"))
+                                .toStdString();
+        }
     }
 
     // Photos always get their own panel — never merge into a multi-balloon
@@ -1491,8 +1497,6 @@ void ComicScene::drawBalloon(ICanvas *canvas, const SceneBalloon &b) const
             const int ty = b.timeBox.top - lineH;
             canvas->drawText((L + R - tw) / 2, ty, b.timestamp);
         }
-
-        // Caption under the timestamp (nick + wrapped text).
         canvas->setFont("Sans Serif", m_fontPoint, false);
         canvas->setPen(CanvasColor::rgb(0, 0, 0), 1);
         int y = b.imageBox.bottom - lineH;

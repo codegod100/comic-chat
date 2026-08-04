@@ -157,6 +157,15 @@ private:
     int m_viewportH = 400;
     int m_panelBatchDepth = 0;
 
+    struct PendingImageFetch {
+        QUrl url;
+        QString caption;
+        QString nick;
+        QString msgid;
+        QString timestamp;
+    };
+    QList<PendingImageFetch> m_deferredImageFetches;
+
     // Hit-test targets for inline image previews rebuilt each paintEvent.
     struct ClickableImage {
         QRect screenRect;

@@ -547,6 +547,27 @@ void MainWindow::appendChatLog(const QString &displayLine, const QString &nick,
     m_log->scrollToBottom();
 }
 
+void MainWindow::queueHistoryLog(const QString &displayLine, const QString &nick,
+                                 const QString &text, const QString &msgid)
+{
+    m_historyLogQueue.append(HistoryLogLine{displayLine, nick, text, msgid});
+}
+
+void MainWindow::flushHistoryLog()
+{
+    if (!m_log || m_historyLogQueue.isEmpty()) {
+        m_historyLogQueue.clear();
+        return;
+    }
+    m_log->setUpdatesEnabled(false);
+    for (const HistoryLogLine &h : m_historyLogQueue) {
+        appendChatLog(h.displayLine, h.nick, h.text, h.msgid);
+    }
+    m_historyLogQueue.clear();
+    m_log->setUpdatesEnabled(true);
+    m_log->scrollToBottom();
+}
+
 void MainWindow::setReplyTarget(const QString &msgid, const QString &nick, const QString &text)
 {
     m_replyMsgId = msgid.trimmed();
@@ -1011,6 +1032,7 @@ void MainWindow::onChannelJoined(const QString &channel)
     appendLog(QStringLiteral("Joined %1 — loading history…").arg(channel));
     m_historyComicQueue.clear();
     m_historyReactQueue.clear();
+    m_historyLogQueue.clear();
     m_historyComicTotal = 0;
 }
 
@@ -1043,6 +1065,8 @@ void MainWindow::flushHistoryComic()
         m_log->setUpdatesEnabled(true);
         m_log->scrollToBottom();
     }
+
+    flushHistoryLog();
 
     if (!queue.isEmpty()) {
         // Comic strip: only the last N history messages (log already has the full set).
@@ -1088,9 +1112,15 @@ void MainWindow::flushHistoryComic()
     // Replay buffered history reacts — now that all log items and comic panels exist.
     if (!reactQueue.isEmpty()) {
         appendLog(QStringLiteral("Applying %1 react(s) from history").arg(reactQueue.size()));
+        if (m_comic) {
+            m_comic->beginPanelBatch();
+        }
         for (const HistoryReact &hr : reactQueue) {
             // Apply without re-queuing as history
             onIrcReact(hr.parentId, hr.emoji, hr.nick, hr.remove, /*history=*/false);
+        }
+        if (m_comic) {
+            m_comic->endPanelBatch();
         }
     }
 
@@ -1114,13 +1144,22 @@ void MainWindow::onIrcMessage(const QString &nick, const QString &text,
             m_comic && m_comic->lookupCachedMessage(replyTo, &origNick, &origText);
         if (haveParent) {
             // Parent line is right-clickable (reply to original).
-            appendChatLog(QStringLiteral("  ↩ %1: %2").arg(origNick, origText), origNick,
-                          origText, replyTo);
+            const QString parentLine =
+                QStringLiteral("  ↩ %1: %2").arg(origNick, origText);
+            if (history) {
+                queueHistoryLog(parentLine, origNick, origText, replyTo);
+            } else {
+                appendChatLog(parentLine, origNick, origText, replyTo);
+            }
         } else {
             appendLog(QStringLiteral("  ↩ (original not in buffer)"));
         }
-        appendChatLog(QStringLiteral("%1 (reply): %2").arg(speaker, text), speaker, text,
-                      msgid);
+        const QString replyLine = QStringLiteral("%1 (reply): %2").arg(speaker, text);
+        if (history) {
+            queueHistoryLog(replyLine, speaker, text, msgid);
+        } else {
+            appendChatLog(replyLine, speaker, text, msgid);
+        }
     };
 
     auto bindAccountDid = [&](bool preloadSprite) {
@@ -1180,19 +1219,23 @@ void MainWindow::onIrcMessage(const QString &nick, const QString &text,
         bindAccountDid(/*preloadSprite=*/true);
     }
 
-    // Batch log widget updates during history flood (huge win on join).
-    if (history && m_log && m_log->updatesEnabled()) {
-        m_log->setUpdatesEnabled(false);
-    }
-
     const QString mediaUrl = tags.value(QStringLiteral("media-url"));
     if (isReply) {
         appendReplyLog(nick);
     } else if (!mediaUrl.isEmpty()) {
-        appendChatLog(QStringLiteral("%1: [image] %2").arg(nick, mediaUrl), nick, text,
-                      msgid);
+        const QString line = QStringLiteral("%1: [image] %2").arg(nick, mediaUrl);
+        if (history) {
+            queueHistoryLog(line, nick, text, msgid);
+        } else {
+            appendChatLog(line, nick, text, msgid);
+        }
     } else {
-        appendChatLog(QStringLiteral("%1: %2").arg(nick, text), nick, text, msgid);
+        const QString line = QStringLiteral("%1: %2").arg(nick, text);
+        if (history) {
+            queueHistoryLog(line, nick, text, msgid);
+        } else {
+            appendChatLog(line, nick, text, msgid);
+        }
     }
 
     // History: full log above; comic only gets last kMaxComicHistory (flush at batch end).
