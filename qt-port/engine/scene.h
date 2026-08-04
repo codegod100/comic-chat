@@ -197,7 +197,8 @@ private:
     void assignFacing(ScenePanel &panel) const;
     void applyBodyFlip(SceneBody &body) const;
     void layoutBalloon(SceneBalloon &b, const SceneBody &body, int balloonIndex,
-                       int balloonCount);
+                       int balloonCount, int bodyCount, int sameSpeakerStack,
+                       int bodyRank);
     void layoutBalloons(ScenePanel &panel);
     void resolveBalloonOverlaps(ScenePanel &panel);
     std::vector<WrappedLine> wrapText(const std::string &text, int maxWidthLogical) const;

@@ -68,6 +68,22 @@ static int overlapShiftUp(const RECT &a, const RECT &b, int margin)
     return b.top + margin - a.bottom;
 }
 
+static int overlapShiftRight(const RECT &a, const RECT &b, int margin)
+{
+    if (!rectsOverlap(a, b, 0)) {
+        return 0;
+    }
+    return b.right + margin - a.left;
+}
+
+static int overlapShiftLeft(const RECT &a, const RECT &b, int margin)
+{
+    if (!rectsOverlap(a, b, 0)) {
+        return 0;
+    }
+    return b.left - margin - a.right;
+}
+
 int logicalLineHeight(int fontPoint, double pxPerTwip)
 {
     QFontMetrics fm(balloonFont(fontPoint));
@@ -533,8 +549,9 @@ std::vector<WrappedLine> ComicScene::wrapText(const std::string &text, int maxWi
     return out;
 }
 
-void ComicScene::layoutBalloon(SceneBalloon &b, const SceneBody &body, int balloonIndex,
-                               int balloonCount)
+void ComicScene::layoutBalloon(SceneBalloon &b, const SceneBody &body, int /*balloonIndex*/,
+                               int balloonCount, int bodyCount, int sameSpeakerStack,
+                               int bodyRank)
 {
     // Panel space: y=0 at top, y=-UNIT_PANEL_H at bottom (top > bottom).
     const int lineH = logicalLineHeight(m_fontPoint, m_layoutPxPerTwip);
@@ -645,8 +662,10 @@ void ComicScene::layoutBalloon(SceneBalloon &b, const SceneBody &body, int ballo
     }
 
     // ── Text speech balloon ─────────────────────────────────────────────
-    const int widthCapPct = balloonCount > 2 ? 42 : (balloonCount > 1 ? 48 : 55);
-    const int maxTextW = UNIT_PANEL_W * widthCapPct / 100;
+    const int crowd = std::max(balloonCount, std::max(bodyCount, 1));
+    const int slotW = UNIT_PANEL_W / crowd;
+    const int widthCapPct = crowd > 2 ? 36 : (crowd > 1 ? 40 : 55);
+    const int maxTextW = std::min(UNIT_PANEL_W * widthCapPct / 100, slotW * 88 / 100);
     b.lines = wrapText(b.text, maxTextW);
 
     int maxW = 0;
@@ -662,20 +681,19 @@ void ComicScene::layoutBalloon(SceneBalloon &b, const SceneBody &body, int ballo
         std::max(1, static_cast<int>(b.lines.size())) + (b.nick.empty() ? 0 : 1);
     int boxW = maxW + 2 * padX;
     int boxH = nTextLines * lineH + 2 * padY;
-    const int maxBoxW = UNIT_PANEL_W * (balloonCount > 1 ? 48 : 78) / 100;
-    const int maxBoxH = UNIT_PANEL_H * (balloonCount > 2 ? 22 : 32) / 100;
+    const int maxBoxW =
+        std::min(UNIT_PANEL_W * (crowd > 1 ? 40 : 78) / 100, slotW * 90 / 100);
+    const int maxBoxH = UNIT_PANEL_H * (crowd > 2 ? 22 : 32) / 100;
     boxW = std::min(std::max(boxW, padX * 2 + 200), maxBoxW);
     boxH = std::min(std::max(boxH, lineH * 2 + padY), maxBoxH);
 
     int cx = body.arrowX;
-    if (balloonCount > 1) {
-        const int spread = UNIT_PANEL_W * 6 / 100;
-        cx += (balloonIndex - (balloonCount - 1) / 2) * (spread / std::max(1, balloonCount - 1));
-    }
     cx = std::max(boxW / 2 + 120, std::min(UNIT_PANEL_W - boxW / 2 - 120, cx));
 
-    const int stackLift = balloonIndex * (boxH + kBalloonSeparation);
-    int bot = body.box.top + kTailGap + stackLift;
+    // Stack only repeated lines from the same speaker; stagger left→right bodies.
+    const int stackLift = sameSpeakerStack * (boxH + kBalloonSeparation);
+    const int bodyStagger = bodyRank * (boxH / 3 + lineH);
+    int bot = body.box.top + kTailGap + stackLift + bodyStagger;
     int top = bot + boxH;
 
     if (top + kCloudExtra > -kTopMargin) {
@@ -913,6 +931,7 @@ void ComicScene::resolveBalloonOverlaps(ScenePanel &panel)
 {
     constexpr int kTopMargin = 160;
     constexpr int kCloudExtra = 140;
+    constexpr int kSideMargin = 120;
     const int cloudTopLimit = -kTopMargin - kCloudExtra;
 
     const int n = static_cast<int>(panel.balloons.size());
@@ -920,7 +939,7 @@ void ComicScene::resolveBalloonOverlaps(ScenePanel &panel)
         return;
     }
 
-    for (int pass = 0; pass < n * 3; ++pass) {
+    for (int pass = 0; pass < n * 4; ++pass) {
         bool changed = false;
         for (int i = 0; i < n; ++i) {
             SceneBalloon &bal = panel.balloons[static_cast<size_t>(i)];
@@ -939,12 +958,27 @@ void ComicScene::resolveBalloonOverlaps(ScenePanel &panel)
 
             for (int j = 0; j < i; ++j) {
                 const SceneBalloon &prev = panel.balloons[static_cast<size_t>(j)];
-                if (rectsOverlap(bal.cloudBox, prev.cloudBox, kBalloonSeparation / 2)) {
-                    const int dy = overlapShiftUp(bal.cloudBox, prev.cloudBox, kBalloonSeparation);
-                    if (dy > 0) {
-                        shiftBalloonRects(bal, 0, dy);
-                        changed = true;
-                    }
+                if (!rectsOverlap(bal.cloudBox, prev.cloudBox, kBalloonSeparation / 2)) {
+                    continue;
+                }
+                const int dy = overlapShiftUp(bal.cloudBox, prev.cloudBox, kBalloonSeparation);
+                if (dy > 0) {
+                    shiftBalloonRects(bal, 0, dy);
+                    changed = true;
+                    continue;
+                }
+                const int dxR =
+                    overlapShiftRight(bal.cloudBox, prev.cloudBox, kBalloonSeparation);
+                if (dxR > 0 && bal.cloudBox.right + dxR <= UNIT_PANEL_W - kSideMargin) {
+                    shiftBalloonRects(bal, dxR, 0);
+                    changed = true;
+                    continue;
+                }
+                const int dxL =
+                    overlapShiftLeft(bal.cloudBox, prev.cloudBox, kBalloonSeparation);
+                if (dxL < 0 && bal.cloudBox.left + dxL >= kSideMargin) {
+                    shiftBalloonRects(bal, dxL, 0);
+                    changed = true;
                 }
             }
 
@@ -958,26 +992,12 @@ void ComicScene::resolveBalloonOverlaps(ScenePanel &panel)
             break;
         }
     }
-
-    // Still overlapping after vertical clamp — nudge sideways (side-by-side speakers).
-    for (int i = 1; i < n; ++i) {
-        SceneBalloon &bal = panel.balloons[static_cast<size_t>(i)];
-        for (int j = 0; j < i; ++j) {
-            const SceneBalloon &prev = panel.balloons[static_cast<size_t>(j)];
-            if (!rectsOverlap(bal.cloudBox, prev.cloudBox, kBalloonSeparation / 2)) {
-                continue;
-            }
-            const int dx = prev.cloudBox.right + kBalloonSeparation - bal.cloudBox.left;
-            if (dx > 0 && bal.cloudBox.right + dx <= UNIT_PANEL_W - 120) {
-                shiftBalloonRects(bal, dx, 0);
-            }
-        }
-    }
 }
 
 void ComicScene::layoutBalloons(ScenePanel &panel)
 {
     const int nBal = static_cast<int>(panel.balloons.size());
+    const int bodyCount = static_cast<int>(panel.bodies.size());
     for (int i = 0; i < nBal; ++i) {
         SceneBalloon &bal = panel.balloons[static_cast<size_t>(i)];
         int bi = findBodyIndex(panel, bal.nick);
@@ -987,7 +1007,21 @@ void ComicScene::layoutBalloons(ScenePanel &panel)
         if (bi < 0) {
             continue;
         }
-        layoutBalloon(bal, panel.bodies[static_cast<size_t>(bi)], i, nBal);
+        int sameSpeakerStack = 0;
+        for (int j = 0; j < i; ++j) {
+            if (nickKey(panel.balloons[static_cast<size_t>(j)].nick) == nickKey(bal.nick)) {
+                ++sameSpeakerStack;
+            }
+        }
+        int bodyRank = 0;
+        const int speakerLeft = panel.bodies[static_cast<size_t>(bi)].box.left;
+        for (int k = 0; k < bodyCount; ++k) {
+            if (panel.bodies[static_cast<size_t>(k)].box.left < speakerLeft) {
+                ++bodyRank;
+            }
+        }
+        layoutBalloon(bal, panel.bodies[static_cast<size_t>(bi)], i, nBal, bodyCount,
+                      sameSpeakerStack, bodyRank);
     }
     resolveBalloonOverlaps(panel);
 }
