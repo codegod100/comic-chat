@@ -196,6 +196,7 @@ private:
     void layoutBalloon(SceneBalloon &b, const SceneBody &body, int balloonIndex,
                        int balloonCount);
     void layoutBalloons(ScenePanel &panel);
+    void resolveBalloonOverlaps(ScenePanel &panel);
     std::vector<WrappedLine> wrapText(const std::string &text, int maxWidthLogical) const;
     int measureLogical(const std::string &s) const;
     void drawPanel(ICanvas *canvas, const ScenePanel &panel, const RECT &pixelRect) const;

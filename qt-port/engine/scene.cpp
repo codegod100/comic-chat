@@ -2,6 +2,7 @@
 // Licensed under the MIT license.
 
 #include "engine/scene.h"
+#include "engine/bbox.h"
 #include "engine/spline.h"
 
 #include <QFont>
@@ -18,6 +19,53 @@ QFont balloonFont(int point)
     QFont f(QStringLiteral("Sans Serif"));
     f.setPointSize(std::max(8, point));
     return f;
+}
+
+constexpr int kBalloonSeparation = 140;
+
+static void shiftBalloonRects(SceneBalloon &b, int dx, int dy)
+{
+    b.cloudBox.left += dx;
+    b.cloudBox.right += dx;
+    b.cloudBox.top += dy;
+    b.cloudBox.bottom += dy;
+    b.textBox.left += dx;
+    b.textBox.right += dx;
+    b.textBox.top += dy;
+    b.textBox.bottom += dy;
+    if (b.hasImage()) {
+        b.imageBox.left += dx;
+        b.imageBox.right += dx;
+        b.imageBox.top += dy;
+        b.imageBox.bottom += dy;
+    }
+}
+
+static RECT inflateRect(const RECT &r, int margin)
+{
+    RECT out = r;
+    out.left -= margin;
+    out.right += margin;
+    out.top += margin;
+    out.bottom -= margin;
+    return out;
+}
+
+static bool rectsOverlap(const RECT &a, const RECT &b, int margin = 0)
+{
+    RECT aa = inflateRect(a, margin);
+    RECT bb = inflateRect(b, margin);
+    return bbox_overlap(&aa, &bb);
+}
+
+// Panel Y grows down (top > bottom). Shift a upward (positive dy) until it sits
+// above obstacle b with separation.
+static int overlapShiftUp(const RECT &a, const RECT &b, int margin)
+{
+    if (!rectsOverlap(a, b, 0)) {
+        return 0;
+    }
+    return b.top + margin - a.bottom;
 }
 
 int logicalLineHeight(int fontPoint, double pxPerTwip)
@@ -621,7 +669,7 @@ void ComicScene::layoutBalloon(SceneBalloon &b, const SceneBody &body, int ballo
     }
     cx = std::max(boxW / 2 + 120, std::min(UNIT_PANEL_W - boxW / 2 - 120, cx));
 
-    const int stackLift = balloonIndex * (boxH / 3 + lineH / 2);
+    const int stackLift = balloonIndex * (boxH + kBalloonSeparation);
     int bot = body.box.top + kTailGap + stackLift;
     int top = bot + boxH;
 
@@ -856,6 +904,72 @@ void ComicScene::assignFacing(ScenePanel &panel) const
     }
 }
 
+void ComicScene::resolveBalloonOverlaps(ScenePanel &panel)
+{
+    constexpr int kTopMargin = 160;
+    constexpr int kCloudExtra = 140;
+    const int cloudTopLimit = -kTopMargin - kCloudExtra;
+
+    const int n = static_cast<int>(panel.balloons.size());
+    if (n <= 1) {
+        return;
+    }
+
+    for (int pass = 0; pass < n * 3; ++pass) {
+        bool changed = false;
+        for (int i = 0; i < n; ++i) {
+            SceneBalloon &bal = panel.balloons[static_cast<size_t>(i)];
+
+            for (const auto &body : panel.bodies) {
+                RECT obstacle = body.box;
+                obstacle.top = body.box.top + 80;
+                if (rectsOverlap(bal.cloudBox, obstacle, kBalloonSeparation / 2)) {
+                    const int dy = overlapShiftUp(bal.cloudBox, obstacle, kBalloonSeparation);
+                    if (dy > 0) {
+                        shiftBalloonRects(bal, 0, dy);
+                        changed = true;
+                    }
+                }
+            }
+
+            for (int j = 0; j < i; ++j) {
+                const SceneBalloon &prev = panel.balloons[static_cast<size_t>(j)];
+                if (rectsOverlap(bal.cloudBox, prev.cloudBox, kBalloonSeparation / 2)) {
+                    const int dy = overlapShiftUp(bal.cloudBox, prev.cloudBox, kBalloonSeparation);
+                    if (dy > 0) {
+                        shiftBalloonRects(bal, 0, dy);
+                        changed = true;
+                    }
+                }
+            }
+
+            if (bal.cloudBox.top > cloudTopLimit) {
+                const int clip = bal.cloudBox.top - cloudTopLimit;
+                shiftBalloonRects(bal, 0, -clip);
+                changed = true;
+            }
+        }
+        if (!changed) {
+            break;
+        }
+    }
+
+    // Still overlapping after vertical clamp — nudge sideways (side-by-side speakers).
+    for (int i = 1; i < n; ++i) {
+        SceneBalloon &bal = panel.balloons[static_cast<size_t>(i)];
+        for (int j = 0; j < i; ++j) {
+            const SceneBalloon &prev = panel.balloons[static_cast<size_t>(j)];
+            if (!rectsOverlap(bal.cloudBox, prev.cloudBox, kBalloonSeparation / 2)) {
+                continue;
+            }
+            const int dx = prev.cloudBox.right + kBalloonSeparation - bal.cloudBox.left;
+            if (dx > 0 && bal.cloudBox.right + dx <= UNIT_PANEL_W - 120) {
+                shiftBalloonRects(bal, dx, 0);
+            }
+        }
+    }
+}
+
 void ComicScene::layoutBalloons(ScenePanel &panel)
 {
     const int nBal = static_cast<int>(panel.balloons.size());
@@ -870,6 +984,7 @@ void ComicScene::layoutBalloons(ScenePanel &panel)
         }
         layoutBalloon(bal, panel.bodies[static_cast<size_t>(bi)], i, nBal);
     }
+    resolveBalloonOverlaps(panel);
 }
 
 void ComicScene::layoutPanel(ScenePanel &panel)
