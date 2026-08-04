@@ -86,6 +86,9 @@ public slots:
 
 signals:
     void statusMessage(const QString &msg);
+    // Emitted when the broker login URL is ready; browserOpened is false when
+    // automatic launch failed (show loginUrlDialog).
+    void loginUrlReady(const QString &url, bool browserOpened);
     void loginSucceeded(const FreeqSession &session);
     void loginFailed(const QString &reason);
     void sessionRefreshed(const FreeqSession &session);

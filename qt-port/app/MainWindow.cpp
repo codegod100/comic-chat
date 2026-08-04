@@ -4,6 +4,7 @@
 #include "app/MainWindow.h"
 #include "app/ComicWidget.h"
 #include "net/IrcClient.h"
+#include "platform/BrowserLaunch.h"
 
 #include <QAction>
 #include <QApplication>
@@ -11,6 +12,7 @@
 #include <QClipboard>
 #include <QComboBox>
 #include <QDateTime>
+#include <QDialog>
 #include <QEvent>
 #include <QFrame>
 #include <QGroupBox>
@@ -110,6 +112,7 @@ MainWindow::MainWindow(QWidget *parent)
 
     m_auth = new FreeqAuth(this);
     connect(m_auth, &FreeqAuth::statusMessage, this, &MainWindow::onAuthStatus);
+    connect(m_auth, &FreeqAuth::loginUrlReady, this, &MainWindow::onLoginUrlReady);
     connect(m_auth, &FreeqAuth::loginSucceeded, this, &MainWindow::onLoginSucceeded);
     connect(m_auth, &FreeqAuth::loginFailed, this, &MainWindow::onLoginFailed);
     connect(m_auth, &FreeqAuth::sessionRefreshed, this, &MainWindow::onSessionRefreshed);
@@ -749,11 +752,72 @@ void MainWindow::setConnectedUi(bool on)
 
 void MainWindow::onLogin()
 {
-    QString h = m_handle->text().trimmed();
+    const QString h = m_handle->text().trimmed();
     if (h.isEmpty()) {
-        h = m_nick->text().trimmed();
+        appendLog(QStringLiteral("Enter your Bluesky / ATProto handle (e.g. you.bsky.social)"));
+        statusBar()->showMessage(
+            QStringLiteral("Enter your Bluesky handle before logging in"), 8000);
+        m_handle->setFocus();
+        return;
+    }
+    if (h.contains(QLatin1Char(' '))) {
+        appendLog(QStringLiteral("Handle cannot contain spaces — use e.g. you.bsky.social"));
+        statusBar()->showMessage(QStringLiteral("Invalid handle — no spaces allowed"), 8000);
+        m_handle->setFocus();
+        return;
     }
     m_auth->login(h);
+}
+
+void MainWindow::onLoginUrlReady(const QString &url, bool browserOpened)
+{
+    appendLog(QStringLiteral("Login URL: %1").arg(url));
+
+    auto *dlg = new QDialog(this);
+    dlg->setAttribute(Qt::WA_DeleteOnClose);
+    dlg->setWindowTitle(QStringLiteral("Bluesky login"));
+    dlg->setModal(false);
+
+    auto *layout = new QVBoxLayout(dlg);
+    auto *intro = new QLabel(
+        browserOpened
+            ? QStringLiteral(
+                  "A browser window should open for Bluesky sign-in. If it did not, "
+                  "click <b>Open in browser</b> below or copy the URL.")
+            : QStringLiteral(
+                  "Could not open your browser automatically. Click <b>Open in browser</b> "
+                  "or copy the URL below, then sign in and return here."),
+        dlg);
+    intro->setWordWrap(true);
+    layout->addWidget(intro);
+
+    auto *urlEdit = new QLineEdit(url, dlg);
+    urlEdit->setReadOnly(true);
+    layout->addWidget(urlEdit);
+
+    auto *btnRow = new QHBoxLayout();
+    auto *openBtn = new QPushButton(QStringLiteral("Open in browser"), dlg);
+    auto *copyBtn = new QPushButton(QStringLiteral("Copy URL"), dlg);
+    auto *closeBtn = new QPushButton(QStringLiteral("Close"), dlg);
+    btnRow->addWidget(openBtn);
+    btnRow->addWidget(copyBtn);
+    btnRow->addStretch();
+    btnRow->addWidget(closeBtn);
+    layout->addLayout(btnRow);
+
+    connect(openBtn, &QPushButton::clicked, dlg, [url]() { openUrlInBrowser(url); });
+    connect(copyBtn, &QPushButton::clicked, dlg, [url]() {
+        QApplication::clipboard()->setText(url);
+    });
+    connect(closeBtn, &QPushButton::clicked, dlg, &QDialog::close);
+    connect(m_auth, &FreeqAuth::loginSucceeded, dlg, &QDialog::close);
+    connect(m_auth, &FreeqAuth::loginFailed, dlg, &QDialog::close);
+    connect(m_auth, &FreeqAuth::loggedOut, dlg, &QDialog::close);
+
+    dlg->resize(520, dlg->sizeHint().height() + 8);
+    dlg->show();
+    dlg->raise();
+    dlg->activateWindow();
 }
 
 void MainWindow::onLogout()

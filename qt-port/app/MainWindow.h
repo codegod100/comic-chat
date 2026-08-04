@@ -48,6 +48,7 @@ private slots:
     void onHistoryBatchEnded();
     void flushHistoryComic();
     void onAuthStatus(const QString &msg);
+    void onLoginUrlReady(const QString &url, bool browserOpened);
     void onLoginSucceeded(const FreeqSession &session);
     void onLoginFailed(const QString &reason);
     void onSessionRefreshed(const FreeqSession &session);
