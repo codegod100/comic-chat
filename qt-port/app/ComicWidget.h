@@ -103,11 +103,13 @@ private:
     void handlePossiblyMedia(const QString &text, const QString &nick,
                              const QHash<QString, QString> &tags, bool fastJoin = false);
     void fetchAndShowImage(const QUrl &url, const QString &caption, const QString &nick,
-                           const QString &msgid = {});
+                           const QString &msgid = {}, const QString &timestamp = {});
     void cacheMessage(const QString &msgid, const QString &nick, const QString &text);
     // freeq: +reply / draft/reply → parent msgid.
     static QString replyParentId(const QHash<QString, QString> &tags);
     static QString messageId(const QHash<QString, QString> &tags);
+    // IRCv3 server-time → short local display string for image cards.
+    static QString formatMessageTime(const QHash<QString, QString> &tags);
     // freeq react tag: +react / draft/react (emoji or shortname). Empty if none.
     static QString reactEmoji(const QHash<QString, QString> &tags);
     static bool isReactRemove(const QHash<QString, QString> &tags);

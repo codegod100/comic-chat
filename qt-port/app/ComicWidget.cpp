@@ -9,6 +9,7 @@
 #include "platform/QtCanvas.h"
 
 #include <QApplication>
+#include <QDateTime>
 #include <QDialog>
 #include <QGuiApplication>
 #include <QHBoxLayout>
@@ -313,7 +314,8 @@ QString ComicWidget::stripUrls(const QString &text)
 }
 
 void ComicWidget::fetchAndShowImage(const QUrl &url, const QString &caption,
-                                       const QString &nick, const QString &msgid)
+                                    const QString &nick, const QString &msgid,
+                                    const QString &timestamp)
 {
     if (!url.isValid()) {
         return;
@@ -337,7 +339,8 @@ void ComicWidget::fetchAndShowImage(const QUrl &url, const QString &caption,
     QNetworkReply *reply = m_nam.get(req);
     const QString cap = caption;
     const QString mid = msgid;
-    connect(reply, &QNetworkReply::finished, this, [this, reply, who, cap, url, flightKey, mid]() {
+    connect(reply, &QNetworkReply::finished, this, [this, reply, who, cap, url, flightKey, mid,
+                                                    timestamp]() {
         reply->deleteLater();
         m_imageFetchInFlight.remove(flightKey);
 
@@ -387,7 +390,8 @@ void ComicWidget::fetchAndShowImage(const QUrl &url, const QString &caption,
             return;
         }
         ensureRpgSprite(who, /*blocking=*/false);
-        m_scene.addImageLine(img, cap.toStdString(), SM_SAY, who.toStdString());
+        m_scene.addImageLine(img, cap.toStdString(), SM_SAY, who.toStdString(),
+                             timestamp.toStdString());
         if (!mid.isEmpty()) {
             m_scene.setMsgIdForLastBalloon(who.toStdString(), mid.toStdString());
         }
@@ -399,6 +403,25 @@ void ComicWidget::fetchAndShowImage(const QUrl &url, const QString &caption,
         relayout();
         update();
     });
+}
+
+QString ComicWidget::formatMessageTime(const QHash<QString, QString> &tags)
+{
+    QString raw = tags.value(QStringLiteral("server-time"));
+    if (raw.isEmpty()) {
+        raw = tags.value(QStringLiteral("time"));
+    }
+    if (raw.isEmpty()) {
+        return QDateTime::currentDateTime().toString(QStringLiteral("MMM d, h:mm AP"));
+    }
+    QDateTime dt = QDateTime::fromString(raw, Qt::ISODateWithMs);
+    if (!dt.isValid()) {
+        dt = QDateTime::fromString(raw, Qt::ISODate);
+    }
+    if (!dt.isValid()) {
+        return raw;
+    }
+    return dt.toLocalTime().toString(QStringLiteral("MMM d, h:mm AP"));
 }
 
 QString ComicWidget::messageId(const QHash<QString, QString> &tags)
@@ -634,7 +657,7 @@ void ComicWidget::handlePossiblyMedia(const QString &text, const QString &nick,
             if (alt.isEmpty()) {
                 alt = stripUrls(text);
             }
-            fetchAndShowImage(QUrl(mediaUrl), alt, who, msgid);
+            fetchAndShowImage(QUrl(mediaUrl), alt, who, msgid, formatMessageTime(tags));
         }
         return;
     }
@@ -675,7 +698,7 @@ void ComicWidget::handlePossiblyMedia(const QString &text, const QString &nick,
         // Ensure speaker is on stage with a temporary text panel only if no image
         // yet — fetchAndShowImage adds the photo panel when ready. For join, still
         // kick the download so history media appears shortly after load.
-        fetchAndShowImage(QUrl(mediaUrl), caption, who, msgid);
+        fetchAndShowImage(QUrl(mediaUrl), caption, who, msgid, formatMessageTime(tags));
         return;
     }
 

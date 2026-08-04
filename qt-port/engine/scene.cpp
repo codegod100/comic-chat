@@ -575,7 +575,9 @@ void ComicScene::layoutBalloon(SceneBalloon &b, const SceneBody &body, int ballo
             (b.nick.empty() ? 0 : 1) + static_cast<int>(b.lines.size());
         const int captionH =
             captionLines > 0 ? captionLines * lineH + padY : padY / 2;
-        const int chromeH = 2 * kFramePad + captionH;
+        const int timestampH =
+            b.timestamp.empty() ? 0 : lineH + padY / 3;
+        const int chromeH = 2 * kFramePad + captionH + timestampH;
 
         const int maxImgW = std::max(800, std::min(wantImgW, roomW - 2 * kFramePad));
         const int maxImgH = std::max(800, std::min(wantImgH, roomH - chromeH));
@@ -634,8 +636,11 @@ void ComicScene::layoutBalloon(SceneBalloon &b, const SceneBody &body, int ballo
 
         b.textBox.left = b.imageBox.left;
         b.textBox.right = b.imageBox.right;
-        b.textBox.top = b.imageBox.bottom - padY / 3;
         b.textBox.bottom = b.cloudBox.bottom + kFramePad / 2;
+        b.textBox.top = b.textBox.bottom + captionH;
+        if (!b.timestamp.empty()) {
+            b.textBox.top += timestampH;
+        }
         return;
     }
 
@@ -1036,7 +1041,7 @@ void ComicScene::addLine(const std::string &text, UCHAR mode, const std::string 
 }
 
 void ComicScene::addImageLine(const ComicImage &image, const std::string &caption, UCHAR mode,
-                              const std::string &nick)
+                              const std::string &nick, const std::string &timestamp)
 {
     if (image.isNull() && caption.empty()) {
         return;
@@ -1058,6 +1063,7 @@ void ComicScene::addImageLine(const ComicImage &image, const std::string &captio
     bal.text = caption;
     bal.nick = who;
     bal.mode = mode;
+    bal.timestamp = timestamp;
     if (!image.isNull()) {
         bal.image = image;
     }
@@ -1436,10 +1442,21 @@ void ComicScene::drawBalloon(ICanvas *canvas, const SceneBalloon &b) const
             b.image.draw(canvas, imgLeft, imgBottom, diw, dih);
         }
 
-        // Caption under the image, inside the card.
+        // Timestamp directly under the image.
+        int y = imgBottom - lineH / 2;
+        if (!b.timestamp.empty()) {
+            canvas->setFont("Sans Serif", std::max(7, m_fontPoint - 2), false);
+            canvas->setPen(CanvasColor::rgb(90, 90, 100), 1);
+            const int tw = measureLogical(b.timestamp);
+            if (y > Btm + lineH) {
+                canvas->drawText((L + R - tw) / 2, y, b.timestamp);
+            }
+            y -= lineH;
+        }
+
+        // Caption under the timestamp (nick + wrapped text).
         canvas->setFont("Sans Serif", m_fontPoint, false);
         canvas->setPen(CanvasColor::rgb(0, 0, 0), 1);
-        int y = imgBottom - lineH;
         const int yMin = Btm + lineH;
         if (!b.nick.empty()) {
             canvas->setFont("Sans Serif", std::max(8, m_fontPoint - 1), true);

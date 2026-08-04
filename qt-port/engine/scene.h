@@ -39,6 +39,8 @@ struct SceneBalloon {
     ComicImage image;
     RECT imageBox{}; // dest rect for photo inside/near balloon
     bool hasImage() const { return !image.isNull(); }
+    // Human-readable post time shown under the image (e.g. "Aug 4, 4:11 AM").
+    std::string timestamp;
 
     // freeq message id this balloon represents (for react targeting).
     std::string msgid;
@@ -121,7 +123,8 @@ public:
     // Spoken line with an inline image (chat photo / freeq media upload).
     // Caption may be empty; image must be non-null.
     void addImageLine(const ComicImage &image, const std::string &caption = {},
-                      UCHAR mode = SM_SAY, const std::string &nick = "you");
+                      UCHAR mode = SM_SAY, const std::string &nick = "you",
+                      const std::string &timestamp = {});
 
     // freeq-style reply: always a new panel with original line + reply (two balloons).
     // origText may be empty if the parent msgid was not in the local cache.
