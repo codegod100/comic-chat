@@ -4,6 +4,7 @@
 #include "app/MainWindow.h"
 #include "app/ComicWidget.h"
 #include "net/IrcClient.h"
+#include "platform/BrowserLaunch.h"
 
 #include <QAction>
 #include <QApplication>
@@ -11,6 +12,7 @@
 #include <QClipboard>
 #include <QComboBox>
 #include <QDateTime>
+#include <QDialog>
 #include <QEvent>
 #include <QFrame>
 #include <QGroupBox>
@@ -110,6 +112,7 @@ MainWindow::MainWindow(QWidget *parent)
 
     m_auth = new FreeqAuth(this);
     connect(m_auth, &FreeqAuth::statusMessage, this, &MainWindow::onAuthStatus);
+    connect(m_auth, &FreeqAuth::loginUrlReady, this, &MainWindow::onLoginUrlReady);
     connect(m_auth, &FreeqAuth::loginSucceeded, this, &MainWindow::onLoginSucceeded);
     connect(m_auth, &FreeqAuth::loginFailed, this, &MainWindow::onLoginFailed);
     connect(m_auth, &FreeqAuth::sessionRefreshed, this, &MainWindow::onSessionRefreshed);
@@ -544,6 +547,36 @@ void MainWindow::appendChatLog(const QString &displayLine, const QString &nick,
     m_log->scrollToBottom();
 }
 
+void MainWindow::queueHistoryLog(const QString &displayLine, const QString &nick,
+                                 const QString &text, const QString &msgid)
+{
+    m_historyLogQueue.append(HistoryLogLine{displayLine, nick, text, msgid});
+}
+
+void MainWindow::flushHistoryLog()
+{
+    if (!m_log || m_historyLogQueue.isEmpty()) {
+        m_historyLogQueue.clear();
+        return;
+    }
+    m_log->setUpdatesEnabled(false);
+    for (const HistoryLogLine &h : m_historyLogQueue) {
+        auto *item = new QListWidgetItem(h.displayLine);
+        item->setData(kRoleBaseLine, h.displayLine);
+        if (!h.msgid.isEmpty()) {
+            item->setData(kRoleMsgId, h.msgid);
+            item->setData(kRoleNick, h.nick);
+            item->setData(kRoleText, h.text);
+            item->setToolTip(
+                QStringLiteral("Right-click to reply/react · msgid %1").arg(h.msgid));
+        }
+        m_log->addItem(item);
+    }
+    m_historyLogQueue.clear();
+    m_log->setUpdatesEnabled(true);
+    m_log->scrollToBottom();
+}
+
 void MainWindow::setReplyTarget(const QString &msgid, const QString &nick, const QString &text)
 {
     m_replyMsgId = msgid.trimmed();
@@ -749,11 +782,72 @@ void MainWindow::setConnectedUi(bool on)
 
 void MainWindow::onLogin()
 {
-    QString h = m_handle->text().trimmed();
+    const QString h = m_handle->text().trimmed();
     if (h.isEmpty()) {
-        h = m_nick->text().trimmed();
+        appendLog(QStringLiteral("Enter your Bluesky / ATProto handle (e.g. you.bsky.social)"));
+        statusBar()->showMessage(
+            QStringLiteral("Enter your Bluesky handle before logging in"), 8000);
+        m_handle->setFocus();
+        return;
+    }
+    if (h.contains(QLatin1Char(' '))) {
+        appendLog(QStringLiteral("Handle cannot contain spaces — use e.g. you.bsky.social"));
+        statusBar()->showMessage(QStringLiteral("Invalid handle — no spaces allowed"), 8000);
+        m_handle->setFocus();
+        return;
     }
     m_auth->login(h);
+}
+
+void MainWindow::onLoginUrlReady(const QString &url, bool browserOpened)
+{
+    appendLog(QStringLiteral("Login URL: %1").arg(url));
+
+    auto *dlg = new QDialog(this);
+    dlg->setAttribute(Qt::WA_DeleteOnClose);
+    dlg->setWindowTitle(QStringLiteral("Bluesky login"));
+    dlg->setModal(false);
+
+    auto *layout = new QVBoxLayout(dlg);
+    auto *intro = new QLabel(
+        browserOpened
+            ? QStringLiteral(
+                  "A browser window should open for Bluesky sign-in. If it did not, "
+                  "click <b>Open in browser</b> below or copy the URL.")
+            : QStringLiteral(
+                  "Could not open your browser automatically. Click <b>Open in browser</b> "
+                  "or copy the URL below, then sign in and return here."),
+        dlg);
+    intro->setWordWrap(true);
+    layout->addWidget(intro);
+
+    auto *urlEdit = new QLineEdit(url, dlg);
+    urlEdit->setReadOnly(true);
+    layout->addWidget(urlEdit);
+
+    auto *btnRow = new QHBoxLayout();
+    auto *openBtn = new QPushButton(QStringLiteral("Open in browser"), dlg);
+    auto *copyBtn = new QPushButton(QStringLiteral("Copy URL"), dlg);
+    auto *closeBtn = new QPushButton(QStringLiteral("Close"), dlg);
+    btnRow->addWidget(openBtn);
+    btnRow->addWidget(copyBtn);
+    btnRow->addStretch();
+    btnRow->addWidget(closeBtn);
+    layout->addLayout(btnRow);
+
+    connect(openBtn, &QPushButton::clicked, dlg, [url]() { openUrlInBrowser(url); });
+    connect(copyBtn, &QPushButton::clicked, dlg, [url]() {
+        QApplication::clipboard()->setText(url);
+    });
+    connect(closeBtn, &QPushButton::clicked, dlg, &QDialog::close);
+    connect(m_auth, &FreeqAuth::loginSucceeded, dlg, &QDialog::close);
+    connect(m_auth, &FreeqAuth::loginFailed, dlg, &QDialog::close);
+    connect(m_auth, &FreeqAuth::loggedOut, dlg, &QDialog::close);
+
+    dlg->resize(520, dlg->sizeHint().height() + 8);
+    dlg->show();
+    dlg->raise();
+    dlg->activateWindow();
 }
 
 void MainWindow::onLogout()
@@ -783,15 +877,18 @@ void MainWindow::onLoginSucceeded(const FreeqSession &session)
                 return;
             }
             if (!sess.handle.isEmpty()) {
-                m_comic->rememberAtprotoIdentity(sess.handle, sess.did);
+                m_comic->rememberAtprotoIdentity(sess.handle, sess.did,
+                                                 /*preloadSprite=*/false);
             }
             if (!sess.nick.isEmpty() && sess.nick != sess.handle) {
-                m_comic->rememberAtprotoIdentity(sess.nick, sess.did);
+                m_comic->rememberAtprotoIdentity(sess.nick, sess.did,
+                                                 /*preloadSprite=*/false);
             }
             if (!sess.displayIdentity().isEmpty() &&
                 sess.displayIdentity() != sess.handle &&
                 sess.displayIdentity() != sess.nick) {
-                m_comic->rememberAtprotoIdentity(sess.displayIdentity(), sess.did);
+                m_comic->rememberAtprotoIdentity(sess.displayIdentity(), sess.did,
+                                                 /*preloadSprite=*/false);
             }
             // Re-apply chosen character to ATProto identities now known.
             applyCurrentCharacterToLocalNicks();
@@ -851,12 +948,14 @@ void MainWindow::doIrcConnect(const FreeqSession &session)
         appendLog(QStringLiteral("Connecting as guest (no web-token)…"));
     }
 
-    // rpg.actor: index IRC nick + handle → DID before chat starts.
+    // rpg.actor: index IRC nick + handle → DID only (no sprite HTTP on connect —
+    // nested downloads freeze the UI while history floods in).
     if (m_comic && !session.did.isEmpty()) {
-        m_comic->rememberAtprotoIdentity(nick, session.did);
+        m_comic->rememberAtprotoIdentity(nick, session.did, /*preloadSprite=*/false);
         if (!session.handle.isEmpty() &&
             session.handle.compare(nick, Qt::CaseInsensitive) != 0) {
-            m_comic->rememberAtprotoIdentity(session.handle, session.did);
+            m_comic->rememberAtprotoIdentity(session.handle, session.did,
+                                             /*preloadSprite=*/false);
         }
     }
 
@@ -947,6 +1046,7 @@ void MainWindow::onChannelJoined(const QString &channel)
     appendLog(QStringLiteral("Joined %1 — loading history…").arg(channel));
     m_historyComicQueue.clear();
     m_historyReactQueue.clear();
+    m_historyLogQueue.clear();
     m_historyComicTotal = 0;
 }
 
@@ -980,6 +1080,8 @@ void MainWindow::flushHistoryComic()
         m_log->scrollToBottom();
     }
 
+    flushHistoryLog();
+
     if (!queue.isEmpty()) {
         // Comic strip: only the last N history messages (log already has the full set).
         // fastJoin=true: no blocking sprite/media HTTP — panels appear immediately.
@@ -989,11 +1091,13 @@ void MainWindow::flushHistoryComic()
         appendLog(QStringLiteral("Comic strip: showing last %1 of %2 history messages")
                       .arg(n)
                       .arg(total));
+        m_comic->beginPanelBatch();
         for (int i = 0; i < n; ++i) {
             const HistoryComicLine &h = queue.at(i);
             m_comic->addChatLine(h.text, h.nick, h.tags, /*fastJoin=*/true);
         }
         m_comic->trimToRecentPanels(kMaxComicHistory);
+        m_comic->endPanelBatch();
 
         // Async rpg.actor upgrade for unique speakers (after UI is responsive).
         QSet<QString> nicks;
@@ -1022,9 +1126,15 @@ void MainWindow::flushHistoryComic()
     // Replay buffered history reacts — now that all log items and comic panels exist.
     if (!reactQueue.isEmpty()) {
         appendLog(QStringLiteral("Applying %1 react(s) from history").arg(reactQueue.size()));
+        if (m_comic) {
+            m_comic->beginPanelBatch();
+        }
         for (const HistoryReact &hr : reactQueue) {
             // Apply without re-queuing as history
             onIrcReact(hr.parentId, hr.emoji, hr.nick, hr.remove, /*history=*/false);
+        }
+        if (m_comic) {
+            m_comic->endPanelBatch();
         }
     }
 
@@ -1048,13 +1158,22 @@ void MainWindow::onIrcMessage(const QString &nick, const QString &text,
             m_comic && m_comic->lookupCachedMessage(replyTo, &origNick, &origText);
         if (haveParent) {
             // Parent line is right-clickable (reply to original).
-            appendChatLog(QStringLiteral("  ↩ %1: %2").arg(origNick, origText), origNick,
-                          origText, replyTo);
+            const QString parentLine =
+                QStringLiteral("  ↩ %1: %2").arg(origNick, origText);
+            if (history) {
+                queueHistoryLog(parentLine, origNick, origText, replyTo);
+            } else {
+                appendChatLog(parentLine, origNick, origText, replyTo);
+            }
         } else {
             appendLog(QStringLiteral("  ↩ (original not in buffer)"));
         }
-        appendChatLog(QStringLiteral("%1 (reply): %2").arg(speaker, text), speaker, text,
-                      msgid);
+        const QString replyLine = QStringLiteral("%1 (reply): %2").arg(speaker, text);
+        if (history) {
+            queueHistoryLog(replyLine, speaker, text, msgid);
+        } else {
+            appendChatLog(replyLine, speaker, text, msgid);
+        }
     };
 
     auto bindAccountDid = [&](bool preloadSprite) {
@@ -1101,21 +1220,36 @@ void MainWindow::onIrcMessage(const QString &nick, const QString &text,
     }
 
     // Cache + identity for every line (history and live).
-    bindAccountDid(/*preloadSprite=*/!history);
-
-    // Batch log widget updates during history flood (huge win on join).
-    if (history && m_log && m_log->updatesEnabled()) {
-        m_log->setUpdatesEnabled(false);
+    if (history) {
+        // Comic panels are not built yet — only cache msgids for +reply parents.
+        if (m_comic) {
+            m_comic->cacheMessageFromTags(text, nick, tags);
+            const QString did = tags.value(QStringLiteral("account"));
+            if (!did.isEmpty() && did.startsWith(QLatin1String("did:"))) {
+                m_comic->rememberAtprotoIdentity(nick, did, /*preloadSprite=*/false);
+            }
+        }
+    } else {
+        bindAccountDid(/*preloadSprite=*/true);
     }
 
     const QString mediaUrl = tags.value(QStringLiteral("media-url"));
     if (isReply) {
         appendReplyLog(nick);
     } else if (!mediaUrl.isEmpty()) {
-        appendChatLog(QStringLiteral("%1: [image] %2").arg(nick, mediaUrl), nick, text,
-                      msgid);
+        const QString line = QStringLiteral("%1: [image] %2").arg(nick, mediaUrl);
+        if (history) {
+            queueHistoryLog(line, nick, text, msgid);
+        } else {
+            appendChatLog(line, nick, text, msgid);
+        }
     } else {
-        appendChatLog(QStringLiteral("%1: %2").arg(nick, text), nick, text, msgid);
+        const QString line = QStringLiteral("%1: %2").arg(nick, text);
+        if (history) {
+            queueHistoryLog(line, nick, text, msgid);
+        } else {
+            appendChatLog(line, nick, text, msgid);
+        }
     }
 
     // History: full log above; comic only gets last kMaxComicHistory (flush at batch end).

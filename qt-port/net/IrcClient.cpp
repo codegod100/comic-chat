@@ -28,6 +28,14 @@ IrcClient::IrcClient(QObject *parent)
 {
     m_keepAliveTimer.setInterval(kKeepAliveIntervalMs);
     connect(&m_keepAliveTimer, &QTimer::timeout, this, &IrcClient::onKeepAliveTick);
+    m_joinHistoryTimer.setSingleShot(true);
+    connect(&m_joinHistoryTimer, &QTimer::timeout, this, [this]() {
+        m_joinHistoryUntilMs = 0;
+        // Flush any queued history if the server never closed a BATCH.
+        if (!m_inHistoryBatch) {
+            emit historyBatchEnded();
+        }
+    });
 }
 
 IrcClient::~IrcClient()
@@ -112,6 +120,8 @@ void IrcClient::connectToServer(const QString &host, quint16 port, const QString
     m_ackedCaps.clear();
     m_historyBatchId.clear();
     m_inHistoryBatch = false;
+    m_joinHistoryUntilMs = 0;
+    m_joinHistoryTimer.stop();
     // Keep m_webToken / m_wantSasl as set by caller.
 
     if (m_useTls) {
@@ -798,6 +808,8 @@ void IrcClient::processLine(const QString &line)
             if (id == m_historyBatchId || m_inHistoryBatch) {
                 m_historyBatchId.clear();
                 m_inHistoryBatch = false;
+                m_joinHistoryUntilMs = 0;
+                m_joinHistoryTimer.stop();
                 emit historyBatchEnded();
             }
         }
@@ -810,6 +822,9 @@ void IrcClient::processLine(const QString &line)
         emit statusMessage(QStringLiteral("%1 joined %2").arg(nick, chan));
         if (nick.compare(m_nick, Qt::CaseInsensitive) == 0) {
             emit channelJoined(chan);
+            // Join-replay may omit BATCH= tags — treat traffic as history briefly.
+            m_joinHistoryUntilMs = QDateTime::currentMSecsSinceEpoch() + 8000;
+            m_joinHistoryTimer.start(8500);
             // freeq also join-replays history; CHATHISTORY fills DB history too.
             if (m_ackedCaps.contains(QStringLiteral("draft/chathistory")) ||
                 m_capLsAccum.contains(QLatin1String("draft/chathistory"), Qt::CaseInsensitive)) {
@@ -831,7 +846,9 @@ void IrcClient::processLine(const QString &line)
                 m_inHistoryBatch ||
                 (!batchId.isEmpty() &&
                  (batchId == m_historyBatchId || batchId.startsWith(QLatin1String("hist")) ||
-                  batchId.startsWith(QLatin1String("ch"))));
+                  batchId.startsWith(QLatin1String("ch")))) ||
+                (m_joinHistoryUntilMs > 0 &&
+                 QDateTime::currentMSecsSinceEpoch() < m_joinHistoryUntilMs);
 
             // Reacts piggyback on +reply/+react tags. They don't get a log line;
             // route to channelReact and let the badge attach to the parent msgid.
@@ -880,7 +897,9 @@ void IrcClient::processLine(const QString &line)
                 m_inHistoryBatch ||
                 (!batchId.isEmpty() &&
                  (batchId == m_historyBatchId || batchId.startsWith(QLatin1String("hist")) ||
-                  batchId.startsWith(QLatin1String("ch"))));
+                  batchId.startsWith(QLatin1String("ch")))) ||
+                (m_joinHistoryUntilMs > 0 &&
+                 QDateTime::currentMSecsSinceEpoch() < m_joinHistoryUntilMs);
 
             // TAGMSG carries only tags; body is empty.
             QString parent, emoji;

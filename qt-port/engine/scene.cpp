@@ -2,10 +2,12 @@
 // Licensed under the MIT license.
 
 #include "engine/scene.h"
+#include "engine/bbox.h"
 #include "engine/spline.h"
 
 #include <QFont>
 #include <QFontMetrics>
+#include <QDateTime>
 
 #include <algorithm>
 #include <cmath>
@@ -18,6 +20,75 @@ QFont balloonFont(int point)
     QFont f(QStringLiteral("Sans Serif"));
     f.setPointSize(std::max(8, point));
     return f;
+}
+
+constexpr int kBalloonSeparation = 140;
+
+static void shiftBalloonRects(SceneBalloon &b, int dx, int dy)
+{
+    b.cloudBox.left += dx;
+    b.cloudBox.right += dx;
+    b.cloudBox.top += dy;
+    b.cloudBox.bottom += dy;
+    b.textBox.left += dx;
+    b.textBox.right += dx;
+    b.textBox.top += dy;
+    b.textBox.bottom += dy;
+    if (!b.timestamp.empty()) {
+        b.timeBox.left += dx;
+        b.timeBox.right += dx;
+        b.timeBox.top += dy;
+        b.timeBox.bottom += dy;
+    }
+    if (b.hasImage()) {
+        b.imageBox.left += dx;
+        b.imageBox.right += dx;
+        b.imageBox.top += dy;
+        b.imageBox.bottom += dy;
+    }
+}
+
+static RECT inflateRect(const RECT &r, int margin)
+{
+    RECT out = r;
+    out.left -= margin;
+    out.right += margin;
+    out.top += margin;
+    out.bottom -= margin;
+    return out;
+}
+
+static bool rectsOverlap(const RECT &a, const RECT &b, int margin = 0)
+{
+    RECT aa = inflateRect(a, margin);
+    RECT bb = inflateRect(b, margin);
+    return bbox_overlap(&aa, &bb);
+}
+
+// Panel Y grows down (top > bottom). Shift a upward (positive dy) until it sits
+// above obstacle b with separation.
+static int overlapShiftUp(const RECT &a, const RECT &b, int margin)
+{
+    if (!rectsOverlap(a, b, 0)) {
+        return 0;
+    }
+    return b.top + margin - a.bottom;
+}
+
+static int overlapShiftRight(const RECT &a, const RECT &b, int margin)
+{
+    if (!rectsOverlap(a, b, 0)) {
+        return 0;
+    }
+    return b.right + margin - a.left;
+}
+
+static int overlapShiftLeft(const RECT &a, const RECT &b, int margin)
+{
+    if (!rectsOverlap(a, b, 0)) {
+        return 0;
+    }
+    return b.left - margin - a.right;
 }
 
 int logicalLineHeight(int fontPoint, double pxPerTwip)
@@ -485,8 +556,9 @@ std::vector<WrappedLine> ComicScene::wrapText(const std::string &text, int maxWi
     return out;
 }
 
-void ComicScene::layoutBalloon(SceneBalloon &b, const SceneBody &body, int balloonIndex,
-                               int balloonCount)
+void ComicScene::layoutBalloon(SceneBalloon &b, const SceneBody &body, int /*balloonIndex*/,
+                               int balloonCount, int bodyCount, int sameSpeakerStack,
+                               int bodyRank)
 {
     // Panel space: y=0 at top, y=-UNIT_PANEL_H at bottom (top > bottom).
     const int lineH = logicalLineHeight(m_fontPoint, m_layoutPxPerTwip);
@@ -527,7 +599,9 @@ void ComicScene::layoutBalloon(SceneBalloon &b, const SceneBody &body, int ballo
             (b.nick.empty() ? 0 : 1) + static_cast<int>(b.lines.size());
         const int captionH =
             captionLines > 0 ? captionLines * lineH + padY : padY / 2;
-        const int chromeH = 2 * kFramePad + captionH;
+        const int timestampH =
+            b.timestamp.empty() ? 0 : lineH + padY; // footer band under photo
+        const int chromeH = 2 * kFramePad + captionH + timestampH;
 
         const int maxImgW = std::max(800, std::min(wantImgW, roomW - 2 * kFramePad));
         const int maxImgH = std::max(800, std::min(wantImgH, roomH - chromeH));
@@ -537,17 +611,28 @@ void ComicScene::layoutBalloon(SceneBalloon &b, const SceneBody &body, int ballo
         int imgH = std::max(1, int(std::lround(ih * scale)));
         imgW = std::min(imgW, maxImgW);
         imgH = std::min(imgH, maxImgH);
-        b.lines = wrapText(b.text, imgW);
-
-        const int totalW = imgW + 2 * kFramePad;
-        const int totalH = imgH + 2 * kFramePad + captionH;
+        // Card must be wide enough for the timestamp (portrait photos were
+        // clipping "Aug 4, 4:48 AM" entirely out of the frame).
+        int minCardInnerW = imgW;
+        if (!b.timestamp.empty()) {
+            minCardInnerW = std::max(minCardInnerW, measureLogical(b.timestamp) + padX);
+        }
+        if (!b.nick.empty()) {
+            minCardInnerW =
+                std::max(minCardInnerW, measureLogical(b.nick + ":") + padX);
+        }
+        int cardInnerW = std::min(minCardInnerW, roomW - 2 * kFramePad);
+        // Wrap caption to the card width (not the possibly-narrow bitmap width).
+        b.lines = wrapText(b.text, std::max(200, cardInnerW - padX / 2));
+        const int captionLinesFinal =
+            (b.nick.empty() ? 0 : 1) + static_cast<int>(b.lines.size());
+        const int captionHFinal =
+            captionLinesFinal > 0 ? captionLinesFinal * lineH + padY : padY / 2;
+        const int chromeHFinal = 2 * kFramePad + captionHFinal + timestampH;
+        int totalW = cardInnerW + 2 * kFramePad;
+        int totalH = imgH + chromeHFinal;
 
         int cx = body.arrowX;
-        if (balloonCount > 1) {
-            const int spread = UNIT_PANEL_W * 8 / 100;
-            cx += (balloonIndex - (balloonCount - 1) / 2) *
-                  (spread / std::max(1, balloonCount - 1));
-        }
         cx = std::max(totalW / 2 + kSideMargin,
                       std::min(UNIT_PANEL_W - totalW / 2 - kSideMargin, cx));
 
@@ -561,39 +646,58 @@ void ComicScene::layoutBalloon(SceneBalloon &b, const SceneBody &body, int ballo
             if (top > cardTopLimit) {
                 // Still too tall: shrink image to remaining height (keep aspect).
                 top = cardTopLimit;
-                const int fitH = std::max(400, top - bot - chromeH);
+                const int fitH = std::max(400, top - bot - chromeHFinal);
                 if (imgH > fitH) {
                     imgW = std::max(1, imgW * fitH / imgH);
                     imgH = fitH;
                 }
-                bot = top - (imgH + chromeH);
+                bot = top - (imgH + chromeHFinal);
             }
         }
 
+        // Keep width ≥ timestamp even after image shrink.
+        cardInnerW = std::max(imgW, minCardInnerW);
+        cardInnerW = std::min(cardInnerW, roomW - 2 * kFramePad);
+        totalW = cardInnerW + 2 * kFramePad;
+        cx = std::max(totalW / 2 + kSideMargin,
+                      std::min(UNIT_PANEL_W - totalW / 2 - kSideMargin, cx));
+
         b.cloudBox.left = cx - totalW / 2;
         b.cloudBox.right = cx + totalW / 2;
-        // Recompute totalW if imgW shrank above.
-        const int finalW = imgW + 2 * kFramePad;
-        b.cloudBox.left = cx - finalW / 2;
-        b.cloudBox.right = cx + finalW / 2;
         b.cloudBox.top = top;
         b.cloudBox.bottom = bot;
 
-        b.imageBox.left = b.cloudBox.left + kFramePad;
-        b.imageBox.right = b.cloudBox.right - kFramePad;
+        // Center the bitmap in the (possibly wider) card.
+        b.imageBox.left = cx - imgW / 2;
+        b.imageBox.right = cx + imgW / 2;
         b.imageBox.top = b.cloudBox.top - kFramePad;
         b.imageBox.bottom = b.imageBox.top - imgH;
 
-        b.textBox.left = b.imageBox.left;
-        b.textBox.right = b.imageBox.right;
-        b.textBox.top = b.imageBox.bottom - padY / 3;
-        b.textBox.bottom = b.cloudBox.bottom + kFramePad / 2;
+        // Stack: image → timestamp → caption (nick + lines). Panel Y: top > bottom.
+        if (!b.timestamp.empty()) {
+            b.timeBox.left = b.cloudBox.left + kFramePad / 2;
+            b.timeBox.right = b.cloudBox.right - kFramePad / 2;
+            b.timeBox.top = b.imageBox.bottom - padY / 4;
+            b.timeBox.bottom = b.timeBox.top - timestampH;
+            b.textBox.left = b.timeBox.left;
+            b.textBox.right = b.timeBox.right;
+            b.textBox.top = b.timeBox.bottom;
+            b.textBox.bottom = b.cloudBox.bottom + kFramePad / 2;
+        } else {
+            b.timeBox = {};
+            b.textBox.left = b.cloudBox.left + kFramePad / 2;
+            b.textBox.right = b.cloudBox.right - kFramePad / 2;
+            b.textBox.bottom = b.cloudBox.bottom + kFramePad / 2;
+            b.textBox.top = b.textBox.bottom + captionHFinal;
+        }
         return;
     }
 
     // ── Text speech balloon ─────────────────────────────────────────────
-    const int widthCapPct = balloonCount > 2 ? 42 : (balloonCount > 1 ? 48 : 55);
-    const int maxTextW = UNIT_PANEL_W * widthCapPct / 100;
+    const int crowd = std::max(balloonCount, std::max(bodyCount, 1));
+    const int slotW = UNIT_PANEL_W / crowd;
+    const int widthCapPct = crowd > 2 ? 36 : (crowd > 1 ? 40 : 55);
+    const int maxTextW = std::min(UNIT_PANEL_W * widthCapPct / 100, slotW * 88 / 100);
     b.lines = wrapText(b.text, maxTextW);
 
     int maxW = 0;
@@ -609,20 +713,19 @@ void ComicScene::layoutBalloon(SceneBalloon &b, const SceneBody &body, int ballo
         std::max(1, static_cast<int>(b.lines.size())) + (b.nick.empty() ? 0 : 1);
     int boxW = maxW + 2 * padX;
     int boxH = nTextLines * lineH + 2 * padY;
-    const int maxBoxW = UNIT_PANEL_W * (balloonCount > 1 ? 48 : 78) / 100;
-    const int maxBoxH = UNIT_PANEL_H * (balloonCount > 2 ? 22 : 32) / 100;
+    const int maxBoxW =
+        std::min(UNIT_PANEL_W * (crowd > 1 ? 40 : 78) / 100, slotW * 90 / 100);
+    const int maxBoxH = UNIT_PANEL_H * (crowd > 2 ? 22 : 32) / 100;
     boxW = std::min(std::max(boxW, padX * 2 + 200), maxBoxW);
     boxH = std::min(std::max(boxH, lineH * 2 + padY), maxBoxH);
 
     int cx = body.arrowX;
-    if (balloonCount > 1) {
-        const int spread = UNIT_PANEL_W * 6 / 100;
-        cx += (balloonIndex - (balloonCount - 1) / 2) * (spread / std::max(1, balloonCount - 1));
-    }
     cx = std::max(boxW / 2 + 120, std::min(UNIT_PANEL_W - boxW / 2 - 120, cx));
 
-    const int stackLift = balloonIndex * (boxH / 3 + lineH / 2);
-    int bot = body.box.top + kTailGap + stackLift;
+    // Stack only repeated lines from the same speaker; stagger left→right bodies.
+    const int stackLift = sameSpeakerStack * (boxH + kBalloonSeparation);
+    const int bodyStagger = bodyRank * (boxH / 3 + lineH);
+    int bot = body.box.top + kTailGap + stackLift + bodyStagger;
     int top = bot + boxH;
 
     if (top + kCloudExtra > -kTopMargin) {
@@ -856,9 +959,77 @@ void ComicScene::assignFacing(ScenePanel &panel) const
     }
 }
 
+void ComicScene::resolveBalloonOverlaps(ScenePanel &panel)
+{
+    constexpr int kTopMargin = 160;
+    constexpr int kCloudExtra = 140;
+    constexpr int kSideMargin = 120;
+    const int cloudTopLimit = -kTopMargin - kCloudExtra;
+
+    const int n = static_cast<int>(panel.balloons.size());
+    if (n <= 1) {
+        return;
+    }
+
+    for (int pass = 0; pass < n * 4; ++pass) {
+        bool changed = false;
+        for (int i = 0; i < n; ++i) {
+            SceneBalloon &bal = panel.balloons[static_cast<size_t>(i)];
+
+            for (const auto &body : panel.bodies) {
+                RECT obstacle = body.box;
+                obstacle.top = body.box.top + 80;
+                if (rectsOverlap(bal.cloudBox, obstacle, kBalloonSeparation / 2)) {
+                    const int dy = overlapShiftUp(bal.cloudBox, obstacle, kBalloonSeparation);
+                    if (dy > 0) {
+                        shiftBalloonRects(bal, 0, dy);
+                        changed = true;
+                    }
+                }
+            }
+
+            for (int j = 0; j < i; ++j) {
+                const SceneBalloon &prev = panel.balloons[static_cast<size_t>(j)];
+                if (!rectsOverlap(bal.cloudBox, prev.cloudBox, kBalloonSeparation / 2)) {
+                    continue;
+                }
+                const int dy = overlapShiftUp(bal.cloudBox, prev.cloudBox, kBalloonSeparation);
+                if (dy > 0) {
+                    shiftBalloonRects(bal, 0, dy);
+                    changed = true;
+                    continue;
+                }
+                const int dxR =
+                    overlapShiftRight(bal.cloudBox, prev.cloudBox, kBalloonSeparation);
+                if (dxR > 0 && bal.cloudBox.right + dxR <= UNIT_PANEL_W - kSideMargin) {
+                    shiftBalloonRects(bal, dxR, 0);
+                    changed = true;
+                    continue;
+                }
+                const int dxL =
+                    overlapShiftLeft(bal.cloudBox, prev.cloudBox, kBalloonSeparation);
+                if (dxL < 0 && bal.cloudBox.left + dxL >= kSideMargin) {
+                    shiftBalloonRects(bal, dxL, 0);
+                    changed = true;
+                }
+            }
+
+            if (bal.cloudBox.top > cloudTopLimit) {
+                const int clip = bal.cloudBox.top - cloudTopLimit;
+                shiftBalloonRects(bal, 0, -clip);
+                changed = true;
+            }
+        }
+        if (!changed) {
+            break;
+        }
+    }
+}
+
 void ComicScene::layoutBalloons(ScenePanel &panel)
 {
     const int nBal = static_cast<int>(panel.balloons.size());
+    const int bodyCount = static_cast<int>(panel.bodies.size());
     for (int i = 0; i < nBal; ++i) {
         SceneBalloon &bal = panel.balloons[static_cast<size_t>(i)];
         int bi = findBodyIndex(panel, bal.nick);
@@ -868,8 +1039,23 @@ void ComicScene::layoutBalloons(ScenePanel &panel)
         if (bi < 0) {
             continue;
         }
-        layoutBalloon(bal, panel.bodies[static_cast<size_t>(bi)], i, nBal);
+        int sameSpeakerStack = 0;
+        for (int j = 0; j < i; ++j) {
+            if (nickKey(panel.balloons[static_cast<size_t>(j)].nick) == nickKey(bal.nick)) {
+                ++sameSpeakerStack;
+            }
+        }
+        int bodyRank = 0;
+        const int speakerLeft = panel.bodies[static_cast<size_t>(bi)].box.left;
+        for (int k = 0; k < bodyCount; ++k) {
+            if (panel.bodies[static_cast<size_t>(k)].box.left < speakerLeft) {
+                ++bodyRank;
+            }
+        }
+        layoutBalloon(bal, panel.bodies[static_cast<size_t>(bi)], i, nBal, bodyCount,
+                      sameSpeakerStack, bodyRank);
     }
+    resolveBalloonOverlaps(panel);
 }
 
 void ComicScene::layoutPanel(ScenePanel &panel)
@@ -912,16 +1098,17 @@ void ComicScene::layoutPanel(ScenePanel &panel)
     layoutBalloons(panel);
 }
 
-void ComicScene::addLine(const std::string &text, UCHAR mode, const std::string &nick)
+void ComicScene::addLine(const std::string &text, UCHAR mode, const std::string &nick,
+                         const std::string &timestamp)
 {
     if (text.empty()) {
         return;
     }
-    addImageLine(ComicImage{}, text, mode, nick);
+    addImageLine(ComicImage{}, text, mode, nick, timestamp);
 }
 
 void ComicScene::addImageLine(const ComicImage &image, const std::string &caption, UCHAR mode,
-                              const std::string &nick)
+                              const std::string &nick, const std::string &timestamp)
 {
     if (image.isNull() && caption.empty()) {
         return;
@@ -943,6 +1130,13 @@ void ComicScene::addImageLine(const ComicImage &image, const std::string &captio
     bal.text = caption;
     bal.nick = who;
     bal.mode = mode;
+    bal.timestamp = timestamp;
+    // Every message gets a readable time (panel footer + photo cards).
+    if (bal.timestamp.empty()) {
+        bal.timestamp = QDateTime::currentDateTime()
+                            .toString(QStringLiteral("MMM d, h:mm AP"))
+                            .toStdString();
+    }
     if (!image.isNull()) {
         bal.image = image;
     }
@@ -1000,7 +1194,7 @@ static std::string trimCopy(const std::string &s)
 
 void ComicScene::addReplyExchange(const std::string &origNick, const std::string &origText,
                                   const std::string &replyNick, const std::string &replyText,
-                                  UCHAR replyMode)
+                                  UCHAR replyMode, const std::string &timestamp)
 {
     if (replyText.empty() && origText.empty()) {
         return;
@@ -1039,6 +1233,12 @@ void ComicScene::addReplyExchange(const std::string &origNick, const std::string
         return;
     }
 
+    const std::string when =
+        timestamp.empty() ? QDateTime::currentDateTime()
+                                .toString(QStringLiteral("MMM d, h:mm AP"))
+                                .toStdString()
+                          : timestamp;
+
     if (!origText.empty()) {
         SceneBalloon orig;
         // Parent is plain speech context; reply balloon is marked SM_REPLY.
@@ -1047,6 +1247,7 @@ void ComicScene::addReplyExchange(const std::string &origNick, const std::string
         orig.text = origText;
         orig.nick = whoOrig;
         orig.mode = SM_SAY;
+        orig.timestamp = when;
         for (auto it = m_panels.rbegin(); it != m_panels.rend() && orig.msgid.empty(); ++it) {
             for (auto bit = it->balloons.rbegin(); bit != it->balloons.rend(); ++bit) {
                 if (nickKey(bit->nick) == nickKey(whoOrig) &&
@@ -1064,6 +1265,7 @@ void ComicScene::addReplyExchange(const std::string &origNick, const std::string
     rep.nick = whoReply;
     (void)replyMode;
     rep.mode = SM_REPLY; // mark reply bubble (not the original)
+    rep.timestamp = when;
     panel.balloons.push_back(std::move(rep));
 
     layoutPanel(panel);
@@ -1226,7 +1428,7 @@ void ComicScene::drawBody(ICanvas *canvas, const SceneBody &body) const
             // Sheet directions are real art — do not mirror.
         } else if (body.flip && !frame.isNull()) {
             // Single-frame custom art: mirror like classic cast.
-            frame.qimage() = frame.qimage().flipped(Qt::Horizontal);
+            frame.qimage() = frame.qimage().mirrored(true, false);
         }
         frame.draw(canvas, body.box.left, body.box.bottom, w, h);
         return;
@@ -1297,7 +1499,8 @@ void ComicScene::drawBalloon(ICanvas *canvas, const SceneBalloon &b) const
         // White photo card + border; trust layout boxes (already fitted).
         RECT frame{L, T, R, Btm};
         canvas->save();
-        canvas->setClipRect(frame);
+        // Clip only the bitmap so timestamp/caption cannot be clipped away when
+        // the string is wider than a portrait photo.
         canvas->setBrush(CanvasColor::rgb(255, 255, 255));
         canvas->setPen(CanvasColor::rgb(20, 20, 20), 40);
         canvas->fillRect(frame);
@@ -1310,22 +1513,37 @@ void ComicScene::drawBalloon(ICanvas *canvas, const SceneBalloon &b) const
         const int imgBottom = b.imageBox.bottom;
 
         if (!b.image.isNull() && diw > 0 && dih > 0) {
+            canvas->save();
+            canvas->setClipRect(RECT{imgLeft - 20, imgTop + 20, imgLeft + diw + 20,
+                                     imgBottom - 20});
             RECT ir{imgLeft - 10, imgTop + 10, imgLeft + diw + 10, imgBottom - 10};
-            ir.left = std::max(ir.left, L + 16);
-            ir.right = std::min(ir.right, R - 16);
-            ir.top = std::min(ir.top, T - 16);
-            ir.bottom = std::max(ir.bottom, Btm + 16);
             canvas->setPen(CanvasColor::rgb(40, 40, 40), 20);
             canvas->setNoBrush();
             canvas->drawRect(ir);
             b.image.draw(canvas, imgLeft, imgBottom, diw, dih);
+            canvas->restore();
         }
 
-        // Caption under the image, inside the card.
+        // Timestamp footer directly under the image bitmap.
+        if (!b.timestamp.empty()) {
+            const int footerTop = b.timeBox.top;
+            const int footerBot = b.timeBox.bottom;
+            RECT footer{b.timeBox.left, footerTop, b.timeBox.right, footerBot};
+            canvas->setBrush(CanvasColor::rgb(245, 245, 248));
+            canvas->setPen(CanvasColor::rgb(210, 210, 218), 12);
+            canvas->fillRect(footer);
+            canvas->drawRect(footer);
+            canvas->setFont("Sans Serif", m_fontPoint, false);
+            canvas->setPen(CanvasColor::rgb(30, 30, 36), 1);
+            const int tw = measureLogical(b.timestamp);
+            const int ty = footerTop - lineH - (footerTop - footerBot - lineH) / 4;
+            canvas->drawText((L + R - tw) / 2, ty, b.timestamp);
+        }
+        // Caption under the timestamp (or under the image when no timestamp).
         canvas->setFont("Sans Serif", m_fontPoint, false);
         canvas->setPen(CanvasColor::rgb(0, 0, 0), 1);
-        int y = imgBottom - lineH;
-        const int yMin = Btm + lineH;
+        int y = (b.timestamp.empty() ? b.imageBox.bottom : b.timeBox.bottom) - lineH / 2;
+        const int yMin = Btm + lineH / 2;
         if (!b.nick.empty()) {
             canvas->setFont("Sans Serif", std::max(8, m_fontPoint - 1), true);
             canvas->setPen(mode == SM_REPLY ? CanvasColor::rgb(30, 80, 160)
@@ -1569,7 +1787,9 @@ int ComicScene::contentWidthForHeight(int contentHeight) const
 
 int ComicScene::contentHeightForHeight(int contentHeight) const
 {
-    return panelSideForHeight(contentHeight);
+    // Extra strip under each panel for the post-time label.
+    constexpr int kTimestampStrip = 22;
+    return panelSideForHeight(contentHeight) + kTimestampStrip;
 }
 
 void ComicScene::draw(ICanvas *canvas, const RECT &dest) const
@@ -1579,12 +1799,14 @@ void ComicScene::draw(ICanvas *canvas, const RECT &dest) const
     }
 
     constexpr int kGap = 14;
+    constexpr int kTimestampStrip = 22;
     const int contentH = std::max(1, dest.bottom - dest.top);
     const int side = panelSideForHeight(contentH);
     const int panelW = side;
     const int panelH = side;
-    // Vertically center the strip in dest if dest is taller than the panel.
-    const int y0 = dest.top + std::max(0, (contentH - side) / 2);
+    // Leave a strip under the panels for post-time labels, then center.
+    const int y0 =
+        dest.top + std::max(0, (contentH - side - kTimestampStrip) / 2);
 
     auto *self = const_cast<ComicScene *>(this);
     self->m_layoutPxPerTwip = double(panelW) / UNIT_PANEL_W;
@@ -1637,6 +1859,29 @@ void ComicScene::draw(ICanvas *canvas, const RECT &dest) const
     for (const auto &p : m_panels) {
         RECT pr{x, y0, x + panelW, y0 + panelH};
         drawPanel(canvas, p, pr);
+
+        // Post time under the panel (beige strip below the black border).
+        std::string when;
+        for (auto it = p.balloons.rbegin(); it != p.balloons.rend(); ++it) {
+            if (!it->timestamp.empty()) {
+                when = it->timestamp;
+                break;
+            }
+        }
+        if (!when.empty()) {
+            canvas->save();
+            canvas->setLogicalOrigin(0, 0);
+            canvas->setLogicalScale(1.0, 1.0);
+            canvas->resetClip();
+            canvas->setFont("Sans Serif", 10, false);
+            canvas->setPen(CanvasColor::rgb(55, 55, 62), 1);
+            const int tw = canvas->measureTextWidth(when);
+            const int tx = pr.left + std::max(0, (panelW - tw) / 2);
+            const int ty = pr.bottom + 15;
+            canvas->drawText(tx, ty, when);
+            canvas->restore();
+        }
+
         x += panelW + kGap;
     }
 }

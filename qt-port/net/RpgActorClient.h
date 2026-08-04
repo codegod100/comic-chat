@@ -19,8 +19,10 @@
 #include <QHash>
 #include <QNetworkAccessManager>
 #include <QObject>
+#include <QSet>
 #include <QString>
 
+#include <functional>
 #include <optional>
 #include <string>
 
@@ -59,11 +61,16 @@ public:
 
     // Full walk sheet for directional facing (preferred for multi-speaker panels).
     // allowLiveFetch: if false, only registry + already-cached sheets (no PDS hop).
+    // Prefer requestSpriteAsync — this path may nest a QEventLoop (legacy).
     std::optional<RpgSpriteSheet> spriteSheetForNick(const QString &nick, int timeoutMs = 5000,
                                                      bool allowLiveFetch = true);
 
     // Memory cache only — never hits the network (fast path for join/history).
     std::optional<RpgSpriteSheet> cachedSheetForNick(const QString &nick) const;
+
+    // Non-blocking: cache/registry hit applies via spriteReady; otherwise queues
+    // async QNetworkReply chain (no nested QEventLoop — safe on the UI thread).
+    void requestSpriteAsync(const QString &nick);
 
     // Idle *down* frame only (compat). Prefer spriteSheetForNick for facing.
     std::optional<ComicImage> spriteForNick(const QString &nick, int timeoutMs = 5000);
@@ -93,6 +100,16 @@ private:
     std::optional<RpgSpriteSheet> loadSheetForRef(const RpgActorRef &ref, const QString &cacheKey,
                                                   int timeoutMs);
 
+    void getBytesAsync(const QUrl &url, int timeoutMs,
+                       const std::function<void(QByteArray)> &done);
+    void finishAsyncSheet(const QString &key, const QString &emitNick, const RpgActorRef &ref,
+                          const QByteArray &bytes);
+    void asyncFetchApiActor(const QString &key, const QString &emitNick, const QString &did,
+                            const QString &handle);
+    void asyncFetchPdsSprite(const QString &key, const QString &emitNick, const QString &did,
+                             const QString &handle);
+    void asyncDownloadSheet(const QString &key, const QString &emitNick, const RpgActorRef &ref);
+
     QNetworkAccessManager m_nam;
     bool m_registryReady = false;
     bool m_registryLoading = false;
@@ -106,4 +123,5 @@ private:
     QHash<QString, RpgSpriteSheet> m_sheetCache; // nick/url → full sheet
     QHash<QString, ComicImage> m_spriteCache;    // nick → down idle frame
     QHash<QString, bool> m_liveMiss; // nick keys that already failed live fetch this session
+    QSet<QString> m_asyncInFlight;   // nick keys with requestSpriteAsync in progress
 };

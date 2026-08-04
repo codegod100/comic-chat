@@ -39,6 +39,9 @@ struct SceneBalloon {
     ComicImage image;
     RECT imageBox{}; // dest rect for photo inside/near balloon
     bool hasImage() const { return !image.isNull(); }
+    // Human-readable post time shown under the image (e.g. "Aug 4, 4:11 AM").
+    std::string timestamp;
+    RECT timeBox{};
 
     // freeq message id this balloon represents (for react targeting).
     std::string msgid;
@@ -115,19 +118,22 @@ public:
 
     // Add a spoken line. Nick is mapped to a stable character from the cast.
     // If setRpgSpriteForNick() was called for this nick, that sprite is used.
+    // timestamp: human-readable post time (IRCv3 server-time); drawn under the panel.
     void addLine(const std::string &text, UCHAR mode = SM_SAY,
-                 const std::string &nick = "you");
+                 const std::string &nick = "you", const std::string &timestamp = {});
 
     // Spoken line with an inline image (chat photo / freeq media upload).
     // Caption may be empty; image must be non-null.
     void addImageLine(const ComicImage &image, const std::string &caption = {},
-                      UCHAR mode = SM_SAY, const std::string &nick = "you");
+                      UCHAR mode = SM_SAY, const std::string &nick = "you",
+                      const std::string &timestamp = {});
 
     // freeq-style reply: always a new panel with original line + reply (two balloons).
     // origText may be empty if the parent msgid was not in the local cache.
     void addReplyExchange(const std::string &origNick, const std::string &origText,
                           const std::string &replyNick, const std::string &replyText,
-                          UCHAR replyMode = SM_SAY);
+                          UCHAR replyMode = SM_SAY,
+                          const std::string &timestamp = {});
 
     // Stamp the server-assigned msgid onto the balloon that just spoke.
     // Prefers the newest balloon for nick with an empty msgid (never overwrites
@@ -194,8 +200,10 @@ private:
     void assignFacing(ScenePanel &panel) const;
     void applyBodyFlip(SceneBody &body) const;
     void layoutBalloon(SceneBalloon &b, const SceneBody &body, int balloonIndex,
-                       int balloonCount);
+                       int balloonCount, int bodyCount, int sameSpeakerStack,
+                       int bodyRank);
     void layoutBalloons(ScenePanel &panel);
+    void resolveBalloonOverlaps(ScenePanel &panel);
     std::vector<WrappedLine> wrapText(const std::string &text, int maxWidthLogical) const;
     int measureLogical(const std::string &s) const;
     void drawPanel(ICanvas *canvas, const ScenePanel &panel, const RECT &pixelRect) const;

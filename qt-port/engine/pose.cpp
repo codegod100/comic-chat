@@ -43,7 +43,7 @@ void CPose::drawMasked(ICanvas *canvas, int x, int y, int w, int h, bool flipH) 
     }
     if (flipH && !tmp.isNull()) {
         // Horizontal mirror — classic Comic Chat m_flip / StretchBlt negative width.
-        tmp.qimage() = tmp.qimage().flipped(Qt::Horizontal);
+        tmp.qimage() = tmp.qimage().mirrored(true, false);
     }
     tmp.draw(canvas, x, y, w, h);
 }

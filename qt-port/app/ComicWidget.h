@@ -31,6 +31,9 @@ public:
     // Cache only (self echo / join history) — no new comic panel.
     void rememberIrcMessage(const QString &text, const QString &nick,
                             const QHash<QString, QString> &tags);
+    // History join: msgid cache for +reply without scanning comic balloons.
+    void cacheMessageFromTags(const QString &text, const QString &nick,
+                              const QHash<QString, QString> &tags);
     // Local send before server msgid: bind later via rememberIrcMessage/echo.
     void noteOutgoingMessage(const QString &text, const QString &nick);
     // freeq react: stamp emoji badge on the balloon for parentMsgid (comic strip).
@@ -44,6 +47,9 @@ public:
     void clearPanels();
     // Keep only the newest N panels in the strip (default 10).
     void trimToRecentPanels(int maxPanels = kMaxComicPanels);
+    // Suppress per-line relayout during history flush / bulk import.
+    void beginPanelBatch();
+    void endPanelBatch();
     int maxComicPanels() const { return kMaxComicPanels; }
     QString statusLine() const;
 
@@ -103,11 +109,14 @@ private:
     void handlePossiblyMedia(const QString &text, const QString &nick,
                              const QHash<QString, QString> &tags, bool fastJoin = false);
     void fetchAndShowImage(const QUrl &url, const QString &caption, const QString &nick,
-                           const QString &msgid = {});
+                           const QString &msgid = {}, const QString &timestamp = {});
     void cacheMessage(const QString &msgid, const QString &nick, const QString &text);
+    void finishPanelUpdate();
     // freeq: +reply / draft/reply → parent msgid.
     static QString replyParentId(const QHash<QString, QString> &tags);
     static QString messageId(const QHash<QString, QString> &tags);
+    // IRCv3 server-time → short local display string for image cards.
+    static QString formatMessageTime(const QHash<QString, QString> &tags);
     // freeq react tag: +react / draft/react (emoji or shortname). Empty if none.
     static QString reactEmoji(const QHash<QString, QString> &tags);
     static bool isReactRemove(const QHash<QString, QString> &tags);
@@ -146,6 +155,16 @@ private:
     QString m_characterName;
     int m_margin = 12;
     int m_viewportH = 400;
+    int m_panelBatchDepth = 0;
+
+    struct PendingImageFetch {
+        QUrl url;
+        QString caption;
+        QString nick;
+        QString msgid;
+        QString timestamp;
+    };
+    QList<PendingImageFetch> m_deferredImageFetches;
 
     // Hit-test targets for inline image previews rebuilt each paintEvent.
     struct ClickableImage {

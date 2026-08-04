@@ -116,6 +116,10 @@ private:
     // Join-history / CHATHISTORY batch tracking
     QString m_historyBatchId;
     bool m_inHistoryBatch = false;
+    // freeq join-replay sometimes omits BATCH tags — treat PRIVMSG as history
+    // for a short window after our JOIN, then flush.
+    qint64 m_joinHistoryUntilMs = 0;
+    QTimer m_joinHistoryTimer;
 
     QTimer m_keepAliveTimer;
     qint64 m_lastServerActivityMs = 0;

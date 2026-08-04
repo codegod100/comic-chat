@@ -3,7 +3,8 @@
 
 #include "net/FreeqAuth.h"
 
-#include <QDesktopServices>
+#include "platform/BrowserLaunch.h"
+
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QNetworkReply>
@@ -166,10 +167,12 @@ void FreeqAuth::login(const QString &handle)
 
     m_loginInProgress = true;
     emit statusMessage(QStringLiteral("Opening browser to sign in as %1…").arg(h));
-    if (!QDesktopServices::openUrl(QUrl(url))) {
-        // Keep the loopback listener up so the user can paste the URL manually.
+    const bool browserOpened = openUrlInBrowser(url);
+    emit loginUrlReady(url, browserOpened);
+    if (!browserOpened) {
         emit statusMessage(
-            QStringLiteral("Could not open browser — open this URL:\n%1").arg(url));
+            QStringLiteral("Could not open browser automatically — use Open in browser "
+                           "in the login dialog, or copy the URL from the log."));
     }
     emit statusMessage(QStringLiteral("Waiting for browser login (loopback :%1)…").arg(port));
 }

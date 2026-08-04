@@ -9,6 +9,7 @@
 #include "platform/QtCanvas.h"
 
 #include <QApplication>
+#include <QDateTime>
 #include <QDialog>
 #include <QGuiApplication>
 #include <QHBoxLayout>
@@ -120,11 +121,13 @@ ComicWidget::ComicWidget(QWidget *parent)
         update();
     });
     connect(&m_rpg, &RpgActorClient::spriteReady, this, [this](const QString &nick) {
+        m_rpgFetchInFlight.remove(nick.trimmed().toLower());
         // Sheet may have been cached by a parallel path; apply + refresh bodies.
         if (auto sheet = m_rpg.cachedSheetForNick(nick)) {
             applyRpgSheet(nick, *sheet);
             relayout();
             update();
+            emit contentResized();
         }
     });
     m_rpg.refreshRegistry();
@@ -234,20 +237,11 @@ void ComicWidget::ensureRpgSpriteAsync(const QString &nick)
         return;
     }
     m_rpgFetchInFlight.insert(key);
-    // Off the IRC/TLS stack: nested QEventLoop is OK once processLine has returned.
-    QTimer::singleShot(0, this, [this, nick, key]() {
-        if (m_scene.hasRpgSpriteForNick(nick.toStdString())) {
-            m_rpgFetchInFlight.remove(key);
-            return;
-        }
-        auto sheet = m_rpg.spriteSheetForNick(nick, 4000, /*allowLiveFetch=*/true);
-        m_rpgFetchInFlight.remove(key);
-        if (sheet && !sheet->isNull()) {
-            applyRpgSheet(nick, *sheet);
-            update();
-            emit contentResized();
-        }
-    });
+    // True async (QNetworkReply) — never nest QEventLoop on the UI thread.
+    m_rpg.requestSpriteAsync(nick);
+    // Flight flag clears when spriteReady fires or after a short settle window
+    // (request may no-op for bare nicks with no DID).
+    QTimer::singleShot(15000, this, [this, key]() { m_rpgFetchInFlight.remove(key); });
 }
 
 bool ComicWidget::looksLikeImageUrl(const QUrl &url)
@@ -313,9 +307,14 @@ QString ComicWidget::stripUrls(const QString &text)
 }
 
 void ComicWidget::fetchAndShowImage(const QUrl &url, const QString &caption,
-                                       const QString &nick, const QString &msgid)
+                                    const QString &nick, const QString &msgid,
+                                    const QString &timestamp)
 {
     if (!url.isValid()) {
+        return;
+    }
+    if (m_panelBatchDepth > 0) {
+        m_deferredImageFetches.append({url, caption, nick, msgid, timestamp});
         return;
     }
     // One panel per (url, nick) — history/live can otherwise fire the same fetch
@@ -337,7 +336,8 @@ void ComicWidget::fetchAndShowImage(const QUrl &url, const QString &caption,
     QNetworkReply *reply = m_nam.get(req);
     const QString cap = caption;
     const QString mid = msgid;
-    connect(reply, &QNetworkReply::finished, this, [this, reply, who, cap, url, flightKey, mid]() {
+    connect(reply, &QNetworkReply::finished, this, [this, reply, who, cap, url, flightKey, mid,
+                                                    timestamp]() {
         reply->deleteLater();
         m_imageFetchInFlight.remove(flightKey);
 
@@ -350,7 +350,11 @@ void ComicWidget::fetchAndShowImage(const QUrl &url, const QString &caption,
                 return;
             }
             ensureRpgSprite(who, /*blocking=*/false);
-            m_scene.addLine(line.toStdString(), SM_SAY, who.toStdString());
+            const QString ts =
+                timestamp.isEmpty()
+                    ? QDateTime::currentDateTime().toString(QStringLiteral("MMM d, h:mm AP"))
+                    : timestamp;
+            m_scene.addLine(line.toStdString(), SM_SAY, who.toStdString(), ts.toStdString());
             if (!mid.isEmpty()) {
                 m_scene.setMsgIdForLastBalloon(who.toStdString(), mid.toStdString());
             }
@@ -359,8 +363,7 @@ void ComicWidget::fetchAndShowImage(const QUrl &url, const QString &caption,
             while (m_imagesShown.size() > 64) {
                 m_imagesShown.erase(m_imagesShown.begin());
             }
-            relayout();
-            update();
+            finishPanelUpdate();
         };
 
         if (reply->error() != QNetworkReply::NoError) {
@@ -387,7 +390,12 @@ void ComicWidget::fetchAndShowImage(const QUrl &url, const QString &caption,
             return;
         }
         ensureRpgSprite(who, /*blocking=*/false);
-        m_scene.addImageLine(img, cap.toStdString(), SM_SAY, who.toStdString());
+        const QString ts =
+            timestamp.isEmpty()
+                ? QDateTime::currentDateTime().toString(QStringLiteral("MMM d, h:mm AP"))
+                : timestamp;
+        m_scene.addImageLine(img, cap.toStdString(), SM_SAY, who.toStdString(),
+                             ts.toStdString());
         if (!mid.isEmpty()) {
             m_scene.setMsgIdForLastBalloon(who.toStdString(), mid.toStdString());
         }
@@ -396,9 +404,39 @@ void ComicWidget::fetchAndShowImage(const QUrl &url, const QString &caption,
         while (m_imagesShown.size() > 64) {
             m_imagesShown.erase(m_imagesShown.begin());
         }
-        relayout();
-        update();
+        finishPanelUpdate();
     });
+}
+
+QString ComicWidget::formatMessageTime(const QHash<QString, QString> &tags)
+{
+    QString raw = tags.value(QStringLiteral("server-time"));
+    if (raw.isEmpty()) {
+        raw = tags.value(QStringLiteral("time"));
+    }
+    if (raw.isEmpty()) {
+        return QDateTime::currentDateTime().toString(QStringLiteral("MMM d, h:mm AP"));
+    }
+    QString normalized = raw.trimmed();
+    if (normalized.endsWith(QLatin1Char('Z'), Qt::CaseInsensitive)) {
+        normalized.chop(1);
+        QDateTime dt = QDateTime::fromString(normalized, Qt::ISODateWithMs);
+        if (!dt.isValid()) {
+            dt = QDateTime::fromString(normalized, Qt::ISODate);
+        }
+        if (dt.isValid()) {
+            dt.setTimeSpec(Qt::UTC);
+            return dt.toLocalTime().toString(QStringLiteral("MMM d, h:mm AP"));
+        }
+    }
+    QDateTime dt = QDateTime::fromString(raw, Qt::ISODateWithMs);
+    if (!dt.isValid()) {
+        dt = QDateTime::fromString(raw, Qt::ISODate);
+    }
+    if (!dt.isValid()) {
+        return raw;
+    }
+    return dt.toLocalTime().toString(QStringLiteral("MMM d, h:mm AP"));
 }
 
 QString ComicWidget::messageId(const QHash<QString, QString> &tags)
@@ -556,6 +594,17 @@ void ComicWidget::rememberIrcMessage(const QString &text, const QString &nick,
     (void)stamped;
 }
 
+void ComicWidget::cacheMessageFromTags(const QString &text, const QString &nick,
+                                       const QHash<QString, QString> &tags)
+{
+    const QString who = nick.isEmpty() ? QStringLiteral("you") : nick;
+    cacheMessage(messageId(tags), who, text);
+    const QString accountDid = tags.value(QStringLiteral("account"));
+    if (!accountDid.isEmpty() && accountDid.startsWith(QLatin1String("did:"))) {
+        m_rpg.rememberDidForNick(who, accountDid);
+    }
+}
+
 void ComicWidget::handlePossiblyMedia(const QString &text, const QString &nick,
                                       const QHash<QString, QString> &tags, bool fastJoin)
 {
@@ -572,7 +621,9 @@ void ComicWidget::handlePossiblyMedia(const QString &text, const QString &nick,
         m_rpg.rememberDidForNick(who, accountDid);
     }
     // History join: never block on HTTP. Live: async upgrade (cache hit is instant).
-    ensureRpgSprite(who, /*blocking=*/false);
+    if (!fastJoin) {
+        ensureRpgSprite(who, /*blocking=*/false);
+    }
 
     // freeq: remember every line by msgid so later +reply can re-stage the original.
     const QString msgid = messageId(tags);
@@ -599,20 +650,22 @@ void ComicWidget::handlePossiblyMedia(const QString &text, const QString &nick,
             origNick = QStringLiteral("?");
             origText = QStringLiteral("(original not in buffer)");
         }
-        if (origNick != QLatin1String("?")) {
+        if (origNick != QLatin1String("?") && !fastJoin) {
             ensureRpgSprite(origNick, /*blocking=*/false);
         }
-        ensureRpgSprite(who, /*blocking=*/false);
+        if (!fastJoin) {
+            ensureRpgSprite(who, /*blocking=*/false);
+        }
         m_scene.addReplyExchange(origNick.toStdString(), origText.toStdString(),
-                                 who.toStdString(), text.toStdString(), SM_SAY);
+                                 who.toStdString(), text.toStdString(), SM_SAY,
+                                 formatMessageTime(tags).toStdString());
         // Stamp msgid onto the reply balloon itself — reacts target this id.
         if (!msgid.isEmpty()) {
             m_scene.setMsgIdForLastBalloon(who.toStdString(), msgid.toStdString());
         }
         // Also stamp origin-to-parent mapping? Keep parent lookup.
         m_scene.trimToMaxPanels(kMaxComicPanels);
-        relayout();
-        update();
+        finishPanelUpdate();
 
         // Image replies: always fetch (async QNetworkReply — non-blocking).
         QString mediaUrl = tags.value(QStringLiteral("media-url"));
@@ -634,7 +687,7 @@ void ComicWidget::handlePossiblyMedia(const QString &text, const QString &nick,
             if (alt.isEmpty()) {
                 alt = stripUrls(text);
             }
-            fetchAndShowImage(QUrl(mediaUrl), alt, who, msgid);
+            fetchAndShowImage(QUrl(mediaUrl), alt, who, msgid, formatMessageTime(tags));
         }
         return;
     }
@@ -675,18 +728,47 @@ void ComicWidget::handlePossiblyMedia(const QString &text, const QString &nick,
         // Ensure speaker is on stage with a temporary text panel only if no image
         // yet — fetchAndShowImage adds the photo panel when ready. For join, still
         // kick the download so history media appears shortly after load.
-        fetchAndShowImage(QUrl(mediaUrl), caption, who, msgid);
+        fetchAndShowImage(QUrl(mediaUrl), caption, who, msgid, formatMessageTime(tags));
         return;
     }
 
     // Normal text
-    m_scene.addLine(text.toStdString(), SM_SAY, who.toStdString());
+    m_scene.addLine(text.toStdString(), SM_SAY, who.toStdString(),
+                    formatMessageTime(tags).toStdString());
     if (!msgid.isEmpty()) {
         m_scene.setMsgIdForLastBalloon(who.toStdString(), msgid.toStdString());
     }
     m_scene.trimToMaxPanels(kMaxComicPanels);
-    relayout();
-    update();
+    finishPanelUpdate();
+}
+
+void ComicWidget::finishPanelUpdate()
+{
+    if (m_panelBatchDepth == 0) {
+        relayout();
+        update();
+    }
+}
+
+void ComicWidget::beginPanelBatch()
+{
+    ++m_panelBatchDepth;
+}
+
+void ComicWidget::endPanelBatch()
+{
+    if (m_panelBatchDepth > 0) {
+        --m_panelBatchDepth;
+    }
+    if (m_panelBatchDepth == 0) {
+        const QList<PendingImageFetch> pending = std::move(m_deferredImageFetches);
+        m_deferredImageFetches.clear();
+        relayout();
+        update();
+        for (const PendingImageFetch &p : pending) {
+            fetchAndShowImage(p.url, p.caption, p.nick, p.msgid, p.timestamp);
+        }
+    }
 }
 
 void ComicWidget::applyReact(const QString &parentMsgid, const QString &emoji,
@@ -698,7 +780,7 @@ void ComicWidget::applyReact(const QString &parentMsgid, const QString &emoji,
     const QString who = reactorNick.isEmpty() ? QStringLiteral("you") : reactorNick;
     const bool hit = m_scene.applyReact(parentMsgid.toStdString(), emoji.toStdString(),
                                         who.toStdString(), remove);
-    if (hit) {
+    if (hit && m_panelBatchDepth == 0) {
         relayout();
         update();
     }
@@ -725,8 +807,7 @@ void ComicWidget::clearPanels()
 void ComicWidget::trimToRecentPanels(int maxPanels)
 {
     m_scene.trimToMaxPanels(maxPanels);
-    relayout();
-    update();
+    finishPanelUpdate();
 }
 
 QStringList ComicWidget::availableRooms() const

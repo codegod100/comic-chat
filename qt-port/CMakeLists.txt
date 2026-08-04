@@ -15,6 +15,7 @@ set(COMIC_ART_DIR "${CMAKE_SOURCE_DIR}/../v1.0-pre-modern/comicart"
 
 add_library(comic_platform STATIC
     platform/QtCanvas.cpp
+    platform/BrowserLaunch.cpp
 )
 target_include_directories(comic_platform PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}
