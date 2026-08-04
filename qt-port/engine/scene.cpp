@@ -600,7 +600,7 @@ void ComicScene::layoutBalloon(SceneBalloon &b, const SceneBody &body, int /*bal
         const int captionH =
             captionLines > 0 ? captionLines * lineH + padY : padY / 2;
         const int timestampH =
-            b.timestamp.empty() ? 0 : lineH + padY / 3;
+            b.timestamp.empty() ? 0 : lineH + padY; // footer band under photo
         const int chromeH = 2 * kFramePad + captionH + timestampH;
 
         const int maxImgW = std::max(800, std::min(wantImgW, roomW - 2 * kFramePad));
@@ -611,10 +611,26 @@ void ComicScene::layoutBalloon(SceneBalloon &b, const SceneBody &body, int /*bal
         int imgH = std::max(1, int(std::lround(ih * scale)));
         imgW = std::min(imgW, maxImgW);
         imgH = std::min(imgH, maxImgH);
-        b.lines = wrapText(b.text, imgW);
-
-        const int totalW = imgW + 2 * kFramePad;
-        const int totalH = imgH + chromeH;
+        // Card must be wide enough for the timestamp (portrait photos were
+        // clipping "Aug 4, 4:48 AM" entirely out of the frame).
+        int minCardInnerW = imgW;
+        if (!b.timestamp.empty()) {
+            minCardInnerW = std::max(minCardInnerW, measureLogical(b.timestamp) + padX);
+        }
+        if (!b.nick.empty()) {
+            minCardInnerW =
+                std::max(minCardInnerW, measureLogical(b.nick + ":") + padX);
+        }
+        int cardInnerW = std::min(minCardInnerW, roomW - 2 * kFramePad);
+        // Wrap caption to the card width (not the possibly-narrow bitmap width).
+        b.lines = wrapText(b.text, std::max(200, cardInnerW - padX / 2));
+        const int captionLinesFinal =
+            (b.nick.empty() ? 0 : 1) + static_cast<int>(b.lines.size());
+        const int captionHFinal =
+            captionLinesFinal > 0 ? captionLinesFinal * lineH + padY : padY / 2;
+        const int chromeHFinal = 2 * kFramePad + captionHFinal + timestampH;
+        int totalW = cardInnerW + 2 * kFramePad;
+        int totalH = imgH + chromeHFinal;
 
         int cx = body.arrowX;
         cx = std::max(totalW / 2 + kSideMargin,
@@ -630,45 +646,49 @@ void ComicScene::layoutBalloon(SceneBalloon &b, const SceneBody &body, int /*bal
             if (top > cardTopLimit) {
                 // Still too tall: shrink image to remaining height (keep aspect).
                 top = cardTopLimit;
-                const int fitH = std::max(400, top - bot - chromeH);
+                const int fitH = std::max(400, top - bot - chromeHFinal);
                 if (imgH > fitH) {
                     imgW = std::max(1, imgW * fitH / imgH);
                     imgH = fitH;
                 }
-                bot = top - (imgH + chromeH);
+                bot = top - (imgH + chromeHFinal);
             }
         }
 
+        // Keep width ≥ timestamp even after image shrink.
+        cardInnerW = std::max(imgW, minCardInnerW);
+        cardInnerW = std::min(cardInnerW, roomW - 2 * kFramePad);
+        totalW = cardInnerW + 2 * kFramePad;
+        cx = std::max(totalW / 2 + kSideMargin,
+                      std::min(UNIT_PANEL_W - totalW / 2 - kSideMargin, cx));
+
         b.cloudBox.left = cx - totalW / 2;
         b.cloudBox.right = cx + totalW / 2;
-        // Recompute totalW if imgW shrank above.
-        const int finalW = imgW + 2 * kFramePad;
-        b.cloudBox.left = cx - finalW / 2;
-        b.cloudBox.right = cx + finalW / 2;
         b.cloudBox.top = top;
         b.cloudBox.bottom = bot;
 
-        b.imageBox.left = b.cloudBox.left + kFramePad;
-        b.imageBox.right = b.cloudBox.right - kFramePad;
+        // Center the bitmap in the (possibly wider) card.
+        b.imageBox.left = cx - imgW / 2;
+        b.imageBox.right = cx + imgW / 2;
         b.imageBox.top = b.cloudBox.top - kFramePad;
         b.imageBox.bottom = b.imageBox.top - imgH;
 
         // Stack: image → timestamp → caption (nick + lines). Panel Y: top > bottom.
         if (!b.timestamp.empty()) {
-            b.timeBox.left = b.imageBox.left;
-            b.timeBox.right = b.imageBox.right;
+            b.timeBox.left = b.cloudBox.left + kFramePad / 2;
+            b.timeBox.right = b.cloudBox.right - kFramePad / 2;
             b.timeBox.top = b.imageBox.bottom - padY / 4;
             b.timeBox.bottom = b.timeBox.top - timestampH;
-            b.textBox.left = b.imageBox.left;
-            b.textBox.right = b.imageBox.right;
+            b.textBox.left = b.timeBox.left;
+            b.textBox.right = b.timeBox.right;
             b.textBox.top = b.timeBox.bottom;
-            b.textBox.bottom = b.textBox.top - captionH;
+            b.textBox.bottom = b.cloudBox.bottom + kFramePad / 2;
         } else {
             b.timeBox = {};
-            b.textBox.left = b.imageBox.left;
-            b.textBox.right = b.imageBox.right;
+            b.textBox.left = b.cloudBox.left + kFramePad / 2;
+            b.textBox.right = b.cloudBox.right - kFramePad / 2;
             b.textBox.bottom = b.cloudBox.bottom + kFramePad / 2;
-            b.textBox.top = b.textBox.bottom + captionH;
+            b.textBox.top = b.textBox.bottom + captionHFinal;
         }
         return;
     }
@@ -1469,7 +1489,8 @@ void ComicScene::drawBalloon(ICanvas *canvas, const SceneBalloon &b) const
         // White photo card + border; trust layout boxes (already fitted).
         RECT frame{L, T, R, Btm};
         canvas->save();
-        canvas->setClipRect(frame);
+        // Clip only the bitmap so timestamp/caption cannot be clipped away when
+        // the string is wider than a portrait photo.
         canvas->setBrush(CanvasColor::rgb(255, 255, 255));
         canvas->setPen(CanvasColor::rgb(20, 20, 20), 40);
         canvas->fillRect(frame);
@@ -1482,30 +1503,37 @@ void ComicScene::drawBalloon(ICanvas *canvas, const SceneBalloon &b) const
         const int imgBottom = b.imageBox.bottom;
 
         if (!b.image.isNull() && diw > 0 && dih > 0) {
+            canvas->save();
+            canvas->setClipRect(RECT{imgLeft - 20, imgTop + 20, imgLeft + diw + 20,
+                                     imgBottom - 20});
             RECT ir{imgLeft - 10, imgTop + 10, imgLeft + diw + 10, imgBottom - 10};
-            ir.left = std::max(ir.left, L + 16);
-            ir.right = std::min(ir.right, R - 16);
-            ir.top = std::min(ir.top, T - 16);
-            ir.bottom = std::max(ir.bottom, Btm + 16);
             canvas->setPen(CanvasColor::rgb(40, 40, 40), 20);
             canvas->setNoBrush();
             canvas->drawRect(ir);
             b.image.draw(canvas, imgLeft, imgBottom, diw, dih);
+            canvas->restore();
         }
 
-        // Timestamp directly under the image (caption must start below this).
+        // Timestamp footer directly under the image bitmap.
         if (!b.timestamp.empty()) {
-            canvas->setFont("Sans Serif", std::max(7, m_fontPoint - 2), false);
-            canvas->setPen(CanvasColor::rgb(70, 70, 82), 1);
+            const int footerTop = b.timeBox.top;
+            const int footerBot = b.timeBox.bottom;
+            RECT footer{b.timeBox.left, footerTop, b.timeBox.right, footerBot};
+            canvas->setBrush(CanvasColor::rgb(245, 245, 248));
+            canvas->setPen(CanvasColor::rgb(210, 210, 218), 12);
+            canvas->fillRect(footer);
+            canvas->drawRect(footer);
+            canvas->setFont("Sans Serif", m_fontPoint, false);
+            canvas->setPen(CanvasColor::rgb(30, 30, 36), 1);
             const int tw = measureLogical(b.timestamp);
-            const int ty = b.timeBox.top - lineH;
+            const int ty = footerTop - lineH - (footerTop - footerBot - lineH) / 4;
             canvas->drawText((L + R - tw) / 2, ty, b.timestamp);
         }
         // Caption under the timestamp (or under the image when no timestamp).
         canvas->setFont("Sans Serif", m_fontPoint, false);
         canvas->setPen(CanvasColor::rgb(0, 0, 0), 1);
-        int y = (b.timestamp.empty() ? b.imageBox.bottom : b.timeBox.bottom) - lineH;
-        const int yMin = Btm + lineH;
+        int y = (b.timestamp.empty() ? b.imageBox.bottom : b.timeBox.bottom) - lineH / 2;
+        const int yMin = Btm + lineH / 2;
         if (!b.nick.empty()) {
             canvas->setFont("Sans Serif", std::max(8, m_fontPoint - 1), true);
             canvas->setPen(mode == SM_REPLY ? CanvasColor::rgb(30, 80, 160)
