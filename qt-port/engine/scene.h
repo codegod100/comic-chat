@@ -41,6 +41,7 @@ struct SceneBalloon {
     bool hasImage() const { return !image.isNull(); }
     // Human-readable post time shown under the image (e.g. "Aug 4, 4:11 AM").
     std::string timestamp;
+    RECT timeBox{};
 
     // freeq message id this balloon represents (for react targeting).
     std::string msgid;

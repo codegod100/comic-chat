@@ -1053,11 +1053,13 @@ void MainWindow::flushHistoryComic()
         appendLog(QStringLiteral("Comic strip: showing last %1 of %2 history messages")
                       .arg(n)
                       .arg(total));
+        m_comic->beginPanelBatch();
         for (int i = 0; i < n; ++i) {
             const HistoryComicLine &h = queue.at(i);
             m_comic->addChatLine(h.text, h.nick, h.tags, /*fastJoin=*/true);
         }
         m_comic->trimToRecentPanels(kMaxComicHistory);
+        m_comic->endPanelBatch();
 
         // Async rpg.actor upgrade for unique speakers (after UI is responsive).
         QSet<QString> nicks;
@@ -1165,7 +1167,18 @@ void MainWindow::onIrcMessage(const QString &nick, const QString &text,
     }
 
     // Cache + identity for every line (history and live).
-    bindAccountDid(/*preloadSprite=*/!history);
+    if (history) {
+        // Comic panels are not built yet — only cache msgids for +reply parents.
+        if (m_comic) {
+            m_comic->cacheMessageFromTags(text, nick, tags);
+            const QString did = tags.value(QStringLiteral("account"));
+            if (!did.isEmpty() && did.startsWith(QLatin1String("did:"))) {
+                m_comic->rememberAtprotoIdentity(nick, did, /*preloadSprite=*/false);
+            }
+        }
+    } else {
+        bindAccountDid(/*preloadSprite=*/true);
+    }
 
     // Batch log widget updates during history flood (huge win on join).
     if (history && m_log && m_log->updatesEnabled()) {

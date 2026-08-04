@@ -33,6 +33,12 @@ static void shiftBalloonRects(SceneBalloon &b, int dx, int dy)
     b.textBox.right += dx;
     b.textBox.top += dy;
     b.textBox.bottom += dy;
+    if (!b.timestamp.empty()) {
+        b.timeBox.left += dx;
+        b.timeBox.right += dx;
+        b.timeBox.top += dy;
+        b.timeBox.bottom += dy;
+    }
     if (b.hasImage()) {
         b.imageBox.left += dx;
         b.imageBox.right += dx;
@@ -610,11 +616,6 @@ void ComicScene::layoutBalloon(SceneBalloon &b, const SceneBody &body, int /*bal
         const int totalH = imgH + 2 * kFramePad + captionH;
 
         int cx = body.arrowX;
-        if (balloonCount > 1) {
-            const int spread = UNIT_PANEL_W * 8 / 100;
-            cx += (balloonIndex - (balloonCount - 1) / 2) *
-                  (spread / std::max(1, balloonCount - 1));
-        }
         cx = std::max(totalW / 2 + kSideMargin,
                       std::min(UNIT_PANEL_W - totalW / 2 - kSideMargin, cx));
 
@@ -657,6 +658,12 @@ void ComicScene::layoutBalloon(SceneBalloon &b, const SceneBody &body, int /*bal
         b.textBox.top = b.textBox.bottom + captionH;
         if (!b.timestamp.empty()) {
             b.textBox.top += timestampH;
+            b.timeBox.left = b.imageBox.left;
+            b.timeBox.right = b.imageBox.right;
+            b.timeBox.top = b.imageBox.bottom - padY / 4;
+            b.timeBox.bottom = b.timeBox.top - timestampH;
+        } else {
+            b.timeBox = {};
         }
         return;
     }
@@ -1476,21 +1483,19 @@ void ComicScene::drawBalloon(ICanvas *canvas, const SceneBalloon &b) const
             b.image.draw(canvas, imgLeft, imgBottom, diw, dih);
         }
 
-        // Timestamp directly under the image.
-        int y = imgBottom - lineH / 2;
+        // Timestamp on the footer row directly under the image bitmap.
         if (!b.timestamp.empty()) {
             canvas->setFont("Sans Serif", std::max(7, m_fontPoint - 2), false);
-            canvas->setPen(CanvasColor::rgb(90, 90, 100), 1);
+            canvas->setPen(CanvasColor::rgb(70, 70, 82), 1);
             const int tw = measureLogical(b.timestamp);
-            if (y > Btm + lineH) {
-                canvas->drawText((L + R - tw) / 2, y, b.timestamp);
-            }
-            y -= lineH;
+            const int ty = b.timeBox.top - lineH;
+            canvas->drawText((L + R - tw) / 2, ty, b.timestamp);
         }
 
         // Caption under the timestamp (nick + wrapped text).
         canvas->setFont("Sans Serif", m_fontPoint, false);
         canvas->setPen(CanvasColor::rgb(0, 0, 0), 1);
+        int y = b.imageBox.bottom - lineH;
         const int yMin = Btm + lineH;
         if (!b.nick.empty()) {
             canvas->setFont("Sans Serif", std::max(8, m_fontPoint - 1), true);

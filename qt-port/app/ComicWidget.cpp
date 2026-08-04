@@ -362,8 +362,7 @@ void ComicWidget::fetchAndShowImage(const QUrl &url, const QString &caption,
             while (m_imagesShown.size() > 64) {
                 m_imagesShown.erase(m_imagesShown.begin());
             }
-            relayout();
-            update();
+            finishPanelUpdate();
         };
 
         if (reply->error() != QNetworkReply::NoError) {
@@ -390,8 +389,12 @@ void ComicWidget::fetchAndShowImage(const QUrl &url, const QString &caption,
             return;
         }
         ensureRpgSprite(who, /*blocking=*/false);
+        const QString ts =
+            timestamp.isEmpty()
+                ? QDateTime::currentDateTime().toString(QStringLiteral("MMM d, h:mm AP"))
+                : timestamp;
         m_scene.addImageLine(img, cap.toStdString(), SM_SAY, who.toStdString(),
-                             timestamp.toStdString());
+                             ts.toStdString());
         if (!mid.isEmpty()) {
             m_scene.setMsgIdForLastBalloon(who.toStdString(), mid.toStdString());
         }
@@ -400,8 +403,7 @@ void ComicWidget::fetchAndShowImage(const QUrl &url, const QString &caption,
         while (m_imagesShown.size() > 64) {
             m_imagesShown.erase(m_imagesShown.begin());
         }
-        relayout();
-        update();
+        finishPanelUpdate();
     });
 }
 
@@ -413,6 +415,18 @@ QString ComicWidget::formatMessageTime(const QHash<QString, QString> &tags)
     }
     if (raw.isEmpty()) {
         return QDateTime::currentDateTime().toString(QStringLiteral("MMM d, h:mm AP"));
+    }
+    QString normalized = raw.trimmed();
+    if (normalized.endsWith(QLatin1Char('Z'), Qt::CaseInsensitive)) {
+        normalized.chop(1);
+        QDateTime dt = QDateTime::fromString(normalized, Qt::ISODateWithMs);
+        if (!dt.isValid()) {
+            dt = QDateTime::fromString(normalized, Qt::ISODate);
+        }
+        if (dt.isValid()) {
+            dt.setTimeSpec(Qt::UTC);
+            return dt.toLocalTime().toString(QStringLiteral("MMM d, h:mm AP"));
+        }
     }
     QDateTime dt = QDateTime::fromString(raw, Qt::ISODateWithMs);
     if (!dt.isValid()) {
@@ -579,6 +593,17 @@ void ComicWidget::rememberIrcMessage(const QString &text, const QString &nick,
     (void)stamped;
 }
 
+void ComicWidget::cacheMessageFromTags(const QString &text, const QString &nick,
+                                       const QHash<QString, QString> &tags)
+{
+    const QString who = nick.isEmpty() ? QStringLiteral("you") : nick;
+    cacheMessage(messageId(tags), who, text);
+    const QString accountDid = tags.value(QStringLiteral("account"));
+    if (!accountDid.isEmpty() && accountDid.startsWith(QLatin1String("did:"))) {
+        m_rpg.rememberDidForNick(who, accountDid);
+    }
+}
+
 void ComicWidget::handlePossiblyMedia(const QString &text, const QString &nick,
                                       const QHash<QString, QString> &tags, bool fastJoin)
 {
@@ -634,8 +659,7 @@ void ComicWidget::handlePossiblyMedia(const QString &text, const QString &nick,
         }
         // Also stamp origin-to-parent mapping? Keep parent lookup.
         m_scene.trimToMaxPanels(kMaxComicPanels);
-        relayout();
-        update();
+        finishPanelUpdate();
 
         // Image replies: always fetch (async QNetworkReply — non-blocking).
         QString mediaUrl = tags.value(QStringLiteral("media-url"));
@@ -708,8 +732,31 @@ void ComicWidget::handlePossiblyMedia(const QString &text, const QString &nick,
         m_scene.setMsgIdForLastBalloon(who.toStdString(), msgid.toStdString());
     }
     m_scene.trimToMaxPanels(kMaxComicPanels);
-    relayout();
-    update();
+    finishPanelUpdate();
+}
+
+void ComicWidget::finishPanelUpdate()
+{
+    if (m_panelBatchDepth == 0) {
+        relayout();
+        update();
+    }
+}
+
+void ComicWidget::beginPanelBatch()
+{
+    ++m_panelBatchDepth;
+}
+
+void ComicWidget::endPanelBatch()
+{
+    if (m_panelBatchDepth > 0) {
+        --m_panelBatchDepth;
+    }
+    if (m_panelBatchDepth == 0) {
+        relayout();
+        update();
+    }
 }
 
 void ComicWidget::applyReact(const QString &parentMsgid, const QString &emoji,
@@ -748,8 +795,7 @@ void ComicWidget::clearPanels()
 void ComicWidget::trimToRecentPanels(int maxPanels)
 {
     m_scene.trimToMaxPanels(maxPanels);
-    relayout();
-    update();
+    finishPanelUpdate();
 }
 
 QStringList ComicWidget::availableRooms() const
